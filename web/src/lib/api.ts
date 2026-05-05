@@ -24,6 +24,12 @@ export interface ProjectMeta {
   last_modified_ms: number;
   session_count: number;
   sessions: SessionMeta[];
+  /** Optional, currently never populated by the backend (only `SessionMeta`
+   *  carries `git_branch`). Declared so the worktree-row UI can keep its
+   *  forward-looking conditional render without a TS error; at runtime this
+   *  is always `undefined`, so the branch label stays hidden until a future
+   *  change starts populating it. */
+  git_branch?: string | null;
 }
 
 export interface ToolUse {
