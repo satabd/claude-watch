@@ -1,11 +1,12 @@
 import * as React from "react";
 import { useApp } from "@/store/app";
+import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Turn } from "./turn";
 import { SelectionToolbar } from "./selection-toolbar";
 import { SessionToolbar } from "./session-toolbar";
 import type { ToolResult } from "@/lib/api";
-import { ArrowDown, ArrowUp, Eye } from "lucide-react";
+import { ArrowDown, ArrowUp, Eye, Search, Globe } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 export function Timeline() {
@@ -119,17 +120,7 @@ export function Timeline() {
   }, [getViewport]);
 
   if (!session) {
-    return (
-      <div className="flex flex-1 flex-col items-center justify-center gap-3 p-8 text-center text-muted-foreground">
-        <Eye className="h-8 w-8 opacity-30" />
-        <div>
-          <div className="text-sm font-medium text-foreground">Pick a session</div>
-          <div className="mt-1 text-xs">
-            Select a project on the left to view its transcripts.
-          </div>
-        </div>
-      </div>
-    );
+    return <NoSessionSelected />;
   }
 
   const q = filterQuery.trim().toLowerCase();
@@ -242,6 +233,56 @@ function ScrollNavButtons({
           </span>
         )}
       </button>
+    </div>
+  );
+}
+
+function NoSessionSelected() {
+  const projects = useApp((s) => s.projects);
+  const setSettingsOpen = useApp((s) => s.setSettingsOpen);
+  const hasProjects = projects.length > 0;
+  return (
+    <div className="flex flex-1 flex-col items-center justify-center p-8 text-center">
+      <div className="max-w-md space-y-4 text-muted-foreground">
+        <div className="flex flex-col items-center gap-2">
+          <Eye className="h-8 w-8 opacity-30" />
+          <div className="text-sm font-medium text-foreground">
+            {hasProjects ? "Select a session to view it" : "No sessions yet"}
+          </div>
+        </div>
+        <ul className="space-y-1.5 text-left text-xs leading-relaxed">
+          <li className="flex items-start gap-2">
+            <span className="mt-[6px] inline-block h-1 w-1 shrink-0 rounded-full bg-muted-foreground/50" />
+            <span>
+              Pick any session from the sidebar to load its full transcript.
+            </span>
+          </li>
+          <li className="flex items-start gap-2">
+            <Search className="mt-[2px] h-3 w-3 shrink-0 opacity-60" />
+            <span>
+              Use the search box and role / tool filters in the toolbar to narrow
+              long sessions.
+            </span>
+          </li>
+          <li className="flex items-start gap-2">
+            <Globe className="mt-[2px] h-3 w-3 shrink-0 opacity-60" />
+            <span>
+              Sessions running on WSL or a remote VPS? Add the host once and the
+              live watcher will mirror them here.
+            </span>
+          </li>
+        </ul>
+        <div className="flex justify-center pt-1">
+          <Button
+            variant="outline"
+            size="sm"
+            className="h-7"
+            onClick={() => setSettingsOpen(true)}
+          >
+            <Globe className="h-3 w-3" /> Add remote host
+          </Button>
+        </div>
+      </div>
     </div>
   );
 }

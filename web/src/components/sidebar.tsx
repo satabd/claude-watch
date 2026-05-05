@@ -14,6 +14,7 @@ import {
   Cpu,
   GitBranch,
   FolderTree,
+  Inbox,
 } from "lucide-react";
 
 export function Sidebar() {
@@ -22,10 +23,19 @@ export function Sidebar() {
   const selectedBucket = useApp((s) => s.selectedBucket);
   const selectedSessionId = useApp((s) => s.selectedSessionId);
   const selectSession = useApp((s) => s.selectSession);
+  const setSettingsOpen = useApp((s) => s.setSettingsOpen);
+  const [loaded, setLoaded] = React.useState(false);
 
   React.useEffect(() => {
-    api.listProjects().then(setProjects).catch(console.error);
-    const t = setInterval(() => api.listProjects().then(setProjects).catch(() => {}), 30_000);
+    api
+      .listProjects()
+      .then(setProjects)
+      .catch(console.error)
+      .finally(() => setLoaded(true));
+    const t = setInterval(
+      () => api.listProjects().then(setProjects).catch(() => {}),
+      30_000,
+    );
     return () => clearInterval(t);
   }, [setProjects]);
 
@@ -39,18 +49,52 @@ export function Sidebar() {
       </div>
       <ScrollArea className="flex-1 scrollbar-thin">
         <div className="space-y-0.5 p-1.5">
-          {tree.map((node) => (
-            <ProjectTreeNode
-              key={node.project.bucket}
-              node={node}
-              selectedBucket={selectedBucket}
-              selectedSessionId={selectedSessionId}
-              onSelect={selectSession}
-            />
-          ))}
+          {loaded && projects.length === 0 ? (
+            <SidebarEmptyState onOpenSettings={() => setSettingsOpen(true)} />
+          ) : (
+            tree.map((node) => (
+              <ProjectTreeNode
+                key={node.project.bucket}
+                node={node}
+                selectedBucket={selectedBucket}
+                selectedSessionId={selectedSessionId}
+                onSelect={selectSession}
+              />
+            ))
+          )}
         </div>
       </ScrollArea>
     </aside>
+  );
+}
+
+function SidebarEmptyState({ onOpenSettings }: { onOpenSettings: () => void }) {
+  return (
+    <div className="m-2 rounded-md border border-dashed border-border bg-background/50 p-3 text-[11.5px] leading-relaxed text-muted-foreground">
+      <div className="mb-1.5 flex items-center gap-1.5 text-foreground">
+        <Inbox className="h-3.5 w-3.5 opacity-70" />
+        <span className="text-[12px] font-medium">No sessions found yet</span>
+      </div>
+      <p className="mb-2">
+        Claude Watcher reads from{" "}
+        <code className="rounded bg-muted px-1 font-mono text-[10.5px]">
+          ~/.claude/projects
+        </code>
+        . Start a Claude Code session in any project directory and it will
+        appear here automatically.
+      </p>
+      <p>
+        For sessions on WSL or a remote machine,{" "}
+        <button
+          type="button"
+          onClick={onOpenSettings}
+          className="font-medium text-primary underline-offset-2 hover:underline"
+        >
+          add a Remote SSH host
+        </button>
+        .
+      </p>
+    </div>
   );
 }
 
@@ -144,6 +188,12 @@ function ProjectTreeNode({ node, selectedBucket, selectedSessionId, onSelect }: 
           {project.sessions.length > sessions.length && (
             <div className="px-2 py-0.5 text-[10px] text-muted-foreground/70">
               + {project.sessions.length - sessions.length} more
+            </div>
+          )}
+          {sessions.length === 0 && !hasChildren && (
+            <div className="px-2 py-1 text-[11px] leading-relaxed text-muted-foreground/80">
+              No visible sessions yet — start or resume a Claude session in this
+              project and it will appear here.
             </div>
           )}
 

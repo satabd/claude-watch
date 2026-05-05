@@ -480,6 +480,11 @@ export function PromptWriter() {
             <label className="mb-1.5 block text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
               Your idea
             </label>
+            {!pw.rough.trim() && (
+              <RoughInputExamples
+                onPick={(text) => setField("rough", text)}
+              />
+            )}
             <textarea
               value={pw.rough}
               onChange={(e) => setField("rough", e.target.value)}
@@ -712,5 +717,49 @@ function ModeSelector({
         ))}
       </PopoverContent>
     </Popover>
+  );
+}
+
+// Starter prompts shown above the textarea when it's empty. Click to fill the
+// textarea with the example text — the user then edits it before generating.
+const ROUGH_EXAMPLES: { label: string; text: string }[] = [
+  {
+    label: "Turn this into a bug report",
+    text: "Turn this into a clean bug report with Observed / Expected / Repro / Fix / Verify sections. Use the selected turn(s) as the source of truth.",
+  },
+  {
+    label: "Make this prompt clearer",
+    text: "Take my rough draft below and rewrite it as a clearer, more specific prompt. Keep the original intent; fix grammar and structure.\n\nDraft:\n",
+  },
+  {
+    label: "Continue from the previous idea",
+    text: "Continue the conversation from where it left off. Pick up the previous idea and propose the next concrete step.",
+  },
+  {
+    label: "Write a Claude Code task prompt",
+    text: "Write a structured Claude Code task prompt for this work. Include scope, files to touch, constraints, and an explicit done-when checklist.",
+  },
+];
+
+function RoughInputExamples({ onPick }: { onPick: (text: string) => void }) {
+  return (
+    <div className="mb-2 rounded-md border border-dashed border-border/70 bg-muted/30 p-2">
+      <div className="mb-1 text-[10.5px] uppercase tracking-wider text-muted-foreground">
+        Try a starter
+      </div>
+      <div className="flex flex-wrap gap-1.5">
+        {ROUGH_EXAMPLES.map((ex) => (
+          <button
+            key={ex.label}
+            type="button"
+            onClick={() => onPick(ex.text)}
+            className="rounded-full border border-border bg-background px-2.5 py-0.5 text-[11.5px] text-muted-foreground transition-colors hover:border-primary/50 hover:bg-accent hover:text-foreground"
+            title={ex.text}
+          >
+            {ex.label}
+          </button>
+        ))}
+      </div>
+    </div>
   );
 }

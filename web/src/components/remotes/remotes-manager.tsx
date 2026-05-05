@@ -290,9 +290,33 @@ export function RemotesManager() {
       )}
 
       {!loading && hosts.length === 0 && !adding && (
-        <div className="rounded-md border border-dashed border-border p-3 text-center text-[12px] text-muted-foreground">
-          No remote hosts configured. Click <b>Add host</b> to point the watcher at a
-          remote machine's <code className="font-mono text-[11px]">~/.claude/projects</code>.
+        <div className="rounded-md border border-dashed border-border bg-background/50 p-3 text-[12px] leading-relaxed text-muted-foreground">
+          <div className="mb-1.5 text-[12px] font-medium text-foreground">
+            No remote hosts yet
+          </div>
+          <ul className="space-y-1">
+            <li className="flex items-start gap-2">
+              <Plus className="mt-[2px] h-3 w-3 shrink-0 opacity-70" />
+              <span>
+                Click <b>Add host</b> to point the watcher at a remote machine's{" "}
+                <code className="font-mono text-[11px]">~/.claude/projects</code>.
+              </span>
+            </li>
+            <li className="flex items-start gap-2">
+              <Search className="mt-[2px] h-3 w-3 shrink-0 opacity-70" />
+              <span>
+                On Windows, <b>Discover WSL</b> finds local distros and suggests
+                ready-to-add hosts.
+              </span>
+            </li>
+            <li className="flex items-start gap-2">
+              <RefreshCw className="mt-[2px] h-3 w-3 shrink-0 opacity-70" />
+              <span>
+                Manual <b>Sync now</b> is optional — once a host is enabled, the
+                live watcher tails active sessions automatically.
+              </span>
+            </li>
+          </ul>
         </div>
       )}
 
