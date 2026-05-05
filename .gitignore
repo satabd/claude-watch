@@ -1,0 +1,41 @@
+# Python
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+
+# Node
+node_modules/
+
+# Build output
+web/dist/
+*.tsbuildinfo
+
+# Vite caches
+node_modules/.vite/
+node_modules/.vite-temp/
+
+# Cache (lives outside the project under ~/.claude/watcher/, but just in case)
+*.sqlite
+*.sqlite-journal
+
+# Local secrets / state — none today, but reserve the names
+.env
+.env.local
+
+# Editor / OS noise
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.swp
+
+# Logs
+*.log
+
+# Test artifacts (sandboxed test runner cleans these up itself, but in case
+# of an interrupted run)
+/tmp_*
+**/tmp_*

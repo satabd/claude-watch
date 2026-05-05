@@ -1,0 +1,161 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 0 0% 100%;
+    --foreground: 240 10% 3.9%;
+    --card: 0 0% 100%;
+    --card-foreground: 240 10% 3.9%;
+    --popover: 0 0% 100%;
+    --popover-foreground: 240 10% 3.9%;
+    --primary: 240 5.9% 10%;
+    --primary-foreground: 0 0% 98%;
+    --secondary: 240 4.8% 95.9%;
+    --secondary-foreground: 240 5.9% 10%;
+    --muted: 240 4.8% 95.9%;
+    --muted-foreground: 240 3.8% 46.1%;
+    --accent: 240 4.8% 95.9%;
+    --accent-foreground: 240 5.9% 10%;
+    --destructive: 0 84.2% 60.2%;
+    --destructive-foreground: 0 0% 98%;
+    --border: 240 5.9% 90%;
+    --input: 240 5.9% 90%;
+    --ring: 240 5.9% 10%;
+    --radius: 0.6rem;
+  }
+
+  .dark {
+    --background: 240 10% 3.9%;
+    --foreground: 0 0% 98%;
+    --card: 240 10% 5.9%;
+    --card-foreground: 0 0% 98%;
+    --popover: 240 10% 5.9%;
+    --popover-foreground: 0 0% 98%;
+    --primary: 0 0% 98%;
+    --primary-foreground: 240 5.9% 10%;
+    --secondary: 240 3.7% 15.9%;
+    --secondary-foreground: 0 0% 98%;
+    --muted: 240 3.7% 15.9%;
+    --muted-foreground: 240 5% 64.9%;
+    --accent: 240 3.7% 15.9%;
+    --accent-foreground: 0 0% 98%;
+    --destructive: 0 62.8% 30.6%;
+    --destructive-foreground: 0 0% 98%;
+    --border: 240 3.7% 15.9%;
+    --input: 240 3.7% 15.9%;
+    --ring: 240 4.9% 83.9%;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+  html, body, #root {
+    height: 100%;
+  }
+  body {
+    @apply bg-background text-foreground antialiased;
+    font-feature-settings: "cv02", "cv03", "cv04", "cv11";
+  }
+}
+
+/* Markdown styling for assistant text */
+.prose-msg {
+  @apply text-[14px] leading-[1.65] text-foreground;
+}
+/* Per-paragraph direction detection so Arabic paragraphs flow RTL even when
+   their container is set to dir="auto" or "ltr". `unicode-bidi: plaintext`
+   tells the browser to determine direction per element from its content's
+   first strong directional character. */
+.prose-msg,
+.prose-msg p,
+.prose-msg li,
+.prose-msg blockquote,
+.prose-msg h1,
+.prose-msg h2,
+.prose-msg h3,
+.prose-msg h4 {
+  unicode-bidi: plaintext;
+}
+.prose-msg p {
+  @apply my-2;
+}
+.prose-msg p:first-child { margin-top: 0; }
+.prose-msg p:last-child { margin-bottom: 0; }
+.prose-msg h1, .prose-msg h2, .prose-msg h3, .prose-msg h4 {
+  @apply font-semibold mt-4 mb-2;
+}
+.prose-msg h1 { @apply text-lg; }
+.prose-msg h2 { @apply text-base; }
+.prose-msg h3 { @apply text-[15px]; }
+.prose-msg ul, .prose-msg ol {
+  @apply my-2 ps-6;
+}
+.prose-msg ul { list-style: disc; }
+.prose-msg ol { list-style: decimal; }
+.prose-msg li { @apply my-1; }
+.prose-msg code:not(pre code) {
+  @apply rounded bg-muted px-1.5 py-0.5 font-mono text-[12.5px];
+}
+.prose-msg pre {
+  @apply rounded-md bg-zinc-950 text-zinc-100 p-3 my-3 overflow-x-auto text-[12.5px] leading-relaxed;
+  direction: ltr;
+}
+.prose-msg pre code {
+  @apply font-mono;
+}
+.prose-msg blockquote {
+  @apply border-s-2 border-border ps-3 my-2 text-muted-foreground italic;
+}
+.prose-msg a {
+  @apply text-primary underline-offset-2 underline decoration-primary/40 hover:decoration-primary;
+}
+.prose-msg table {
+  @apply my-3 w-full border-collapse text-[13px];
+}
+.prose-msg th, .prose-msg td {
+  @apply border border-border px-2 py-1 text-start;
+}
+.prose-msg th {
+  @apply bg-muted font-semibold;
+}
+.prose-msg hr {
+  @apply my-4 border-border;
+}
+
+/* RTL adjustments */
+[dir="rtl"] .prose-msg ul,
+[dir="rtl"] .prose-msg ol {
+  padding-left: 0;
+  padding-right: 1.5rem;
+}
+
+/* Custom scrollbar */
+.scrollbar-thin::-webkit-scrollbar { width: 8px; height: 8px; }
+.scrollbar-thin::-webkit-scrollbar-track { background: transparent; }
+.scrollbar-thin::-webkit-scrollbar-thumb {
+  background: hsl(var(--muted));
+  border-radius: 4px;
+}
+.scrollbar-thin::-webkit-scrollbar-thumb:hover {
+  background: hsl(var(--muted-foreground) / 0.4);
+}
+
+/* Selection toolbar fade */
+@keyframes pop-in {
+  from { opacity: 0; transform: translateY(4px) scale(0.95); }
+  to   { opacity: 1; transform: translateY(0) scale(1); }
+}
+.pop-in { animation: pop-in 120ms ease-out; }
+
+/* Live indicator pulse */
+@keyframes live-pulse {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0.4; }
+}
+.live-dot {
+  animation: live-pulse 1.6s ease-in-out infinite;
+}
