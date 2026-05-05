@@ -34,16 +34,15 @@ export function SettingsSheet() {
   const setSettings = useApp((s) => s.setSettings);
   const [busy, setBusy] = React.useState<string | null>(null);
 
+  // The on-mount settings fetch lives in App.tsx now (so the topbar provider
+  // badge keeps working even when this sheet is lazy-loaded). We still refetch
+  // on first open in case the user opened the sheet before that initial load
+  // completed.
   React.useEffect(() => {
     if (open && !settings) {
       api.getSettings().then(setSettings).catch(console.error);
     }
   }, [open, settings, setSettings]);
-
-  React.useEffect(() => {
-    // Load on mount so the topbar can show the active provider badge
-    api.getSettings().then(setSettings).catch(() => {});
-  }, [setSettings]);
 
   const switchProvider = async (provider: string) => {
     if (busy || settings?.provider === provider) return;

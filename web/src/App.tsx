@@ -4,12 +4,24 @@ import { Topbar } from "@/components/topbar";
 import { Sidebar } from "@/components/sidebar";
 import { Timeline } from "@/components/timeline/timeline";
 import { Scratchpad } from "@/components/scratchpad";
-import { SettingsSheet } from "@/components/settings-sheet";
-import { PromptWriter } from "@/components/prompt-writer/prompt-writer";
 import { StatusBar } from "@/components/status-bar";
 import { useApp } from "@/store/app";
 import { api } from "@/lib/api";
 import { liveStream, type LiveEvent } from "@/lib/sse";
+
+// Lazy-load heavy sheets so they don't ship in the initial bundle. SettingsSheet
+// pulls RemotesManager (~685 lines) with it; PromptWriter is the largest single
+// component (~716 lines) and pulls react-markdown/remark-gfm via its preview pane.
+// Suspense fallback is `null` because both are off-screen until their open flag
+// flips, so no fallback UI is ever visible to the user.
+const SettingsSheet = React.lazy(() =>
+  import("@/components/settings-sheet").then((m) => ({ default: m.SettingsSheet }))
+);
+const PromptWriter = React.lazy(() =>
+  import("@/components/prompt-writer/prompt-writer").then((m) => ({
+    default: m.PromptWriter,
+  }))
+);
 
 export default function App() {
   const theme = useApp((s) => s.theme);
@@ -21,11 +33,21 @@ export default function App() {
   const toggleScratchpad = useApp((s) => s.toggleScratchpad);
   const session = useApp((s) => s.session);
   const mergeTranslations = useApp((s) => s.mergeTranslations);
+  const settingsOpen = useApp((s) => s.settingsOpen);
+  const promptWriterOpen = useApp((s) => s.promptWriter.open);
+  const setSettings = useApp((s) => s.setSettings);
 
   // Apply theme class
   React.useEffect(() => {
     document.documentElement.classList.toggle("dark", theme === "dark");
   }, [theme]);
+
+  // Load settings on mount so the topbar can show the active provider badge
+  // without forcing the SettingsSheet chunk to download. (SettingsSheet used
+  // to own this fetch back when it was eagerly imported.)
+  React.useEffect(() => {
+    api.getSettings().then(setSettings).catch(() => {});
+  }, [setSettings]);
 
   // Load selected session
   React.useEffect(() => {
@@ -105,9 +127,28 @@ export default function App() {
         </main>
       </div>
       <StatusBar />
-      <SettingsSheet />
-      <PromptWriter />
+      <LazyOnce open={settingsOpen}>
+        <React.Suspense fallback={null}>
+          <SettingsSheet />
+        </React.Suspense>
+      </LazyOnce>
+      <LazyOnce open={promptWriterOpen}>
+        <React.Suspense fallback={null}>
+          <PromptWriter />
+        </React.Suspense>
+      </LazyOnce>
       <Toaster position="bottom-right" theme={theme} richColors />
     </div>
   );
+}
+
+/** Mounts children once `open` first flips true, then keeps them mounted so the
+ *  Sheet's close animation still plays. The chunk download therefore happens
+ *  exactly once, when the user first opens the surface. */
+function LazyOnce({ open, children }: { open: boolean; children: React.ReactNode }) {
+  const [mounted, setMounted] = React.useState(open);
+  React.useEffect(() => {
+    if (open && !mounted) setMounted(true);
+  }, [open, mounted]);
+  return mounted ? <>{children}</> : null;
 }
