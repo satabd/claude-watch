@@ -3,20 +3,28 @@
 """
 from __future__ import annotations
 
-import asyncio
-from contextlib import asynccontextmanager
-from pathlib import Path
+# Logging must be configured BEFORE any submodule that emits log lines at
+# module-import time (notably server.providers.__init__ which logs the
+# concurrency limit, and server.remote_watcher which logs the tunables).
+# Override the level with WATCHER_LOG_LEVEL=DEBUG / WARNING / etc.
+from .log_config import configure_logging
 
-from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
-from fastapi.staticfiles import StaticFiles
+configure_logging()
 
-from . import db
-from .remote_watcher import RemoteWatcherManager
-from .routes import actions, projects, prompt_writer, remotes as remotes_routes, settings as settings_routes
-from .routes import stream as stream_routes
-from .watcher import WatcherService
+import asyncio  # noqa: E402  (must follow configure_logging())
+from contextlib import asynccontextmanager  # noqa: E402
+from pathlib import Path  # noqa: E402
+
+from fastapi import FastAPI  # noqa: E402
+from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
+from fastapi.responses import FileResponse  # noqa: E402
+from fastapi.staticfiles import StaticFiles  # noqa: E402
+
+from . import db  # noqa: E402
+from .remote_watcher import RemoteWatcherManager  # noqa: E402
+from .routes import actions, projects, prompt_writer, remotes as remotes_routes, settings as settings_routes  # noqa: E402
+from .routes import stream as stream_routes  # noqa: E402
+from .watcher import WatcherService  # noqa: E402
 
 watcher_service = WatcherService()
 remote_watcher_manager = RemoteWatcherManager()
