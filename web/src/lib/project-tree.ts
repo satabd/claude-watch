@@ -80,7 +80,7 @@ function mergeByCwd(projects: ProjectMeta[]): ProjectMeta[] {
 /** When the same session_id appears twice (e.g. local ssh-* cache + remote
  *  mirror), keep the one whose file is largest, then most-recently modified.
  *  Remote-mirror copies almost always win since we sync the latest bytes. */
-function dedupeSessions(sessions: ProjectMeta["sessions"]): ProjectMeta["sessions"] {
+export function dedupeSessions(sessions: ProjectMeta["sessions"]): ProjectMeta["sessions"] {
   const seen = new Map<string, ProjectMeta["sessions"][number]>();
   for (const s of sessions) {
     const prev = seen.get(s.session_id);

@@ -52,10 +52,16 @@ echo "host=${HOST_NAME} (id=$ID), sandbox bucket=${SANDBOX_BUCKET}"
 wsl -d Ubuntu -- mkdir -p "$SANDBOX_REMOTE_DIR"
 wsl -d Ubuntu -- bash -c "echo '{\"type\":\"watcher-test-init\",\"stamp\":\"${TS}\"}' > '$SANDBOX_REMOTE'"
 
-# Wait for the watcher's full-scan or incremental loop to discover it. Default
-# FULL_SCAN_INTERVAL is 30s; we kick `Sync now` to short-circuit that wait.
-curl -s -X POST "$API/api/remotes/$ID/sync" >/dev/null
-sleep 2
+# The watcher's incremental poll only re-stats files in its `_known` set. A
+# brand-new bucket created AFTER the watcher's initial full-scan is invisible
+# until the next FULL_SCAN_INTERVAL (30s default) fires. To make tests
+# deterministic without waiting that long, we disable+re-enable the host
+# which forces a fresh SSH connect + full-scan that picks up the sandbox.
+curl -s -X PATCH "$API/api/remotes/$ID" -H "Content-Type: application/json" -d '{"enabled":false}' >/dev/null
+sleep 1
+curl -s -X PATCH "$API/api/remotes/$ID" -H "Content-Type: application/json" -d '{"enabled":true}' >/dev/null
+# Give the watcher time to reconnect, full-scan, and download the sandbox file.
+sleep 5
 echo
 
 trigger_append() {

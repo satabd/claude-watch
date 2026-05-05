@@ -32,6 +32,9 @@ node_modules/.vite-temp/
 Thumbs.db
 *.swp
 
+# Claude-Code-tooling preview launch config (developer-machine specific)
+.claude/launch.json
+
 # Logs
 *.log
 

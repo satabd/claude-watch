@@ -1,15 +1,20 @@
 """SQLite cache for translations and scratchpad."""
 from __future__ import annotations
 
+import datetime as _dt
 import hashlib
+import logging
+import shutil
 import sqlite3
 import time
 from pathlib import Path
 from threading import RLock
-from typing import Any
+from typing import Any, Callable
 
 DB_PATH = Path.home() / ".claude" / "watcher" / "cache.sqlite"
 DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+
+_log = logging.getLogger("watcher.db")
 
 # Reentrant: helper functions call other helpers (e.g. add_*  → get_*) and
 # we don't want non-reentrant deadlocks when those nest while holding the lock.
@@ -22,101 +27,249 @@ def _conn() -> sqlite3.Connection:
     return conn
 
 
-def init() -> None:
+# ---------------------------------------------------------------------------
+# Migrations
+# ---------------------------------------------------------------------------
+#
+# We track schema version via SQLite's built-in ``PRAGMA user_version`` (an
+# integer stored in the database header) instead of a separate metadata table.
+# Each migration is a tuple ``(version, callable, description)`` that brings
+# the schema from version ``N-1`` to ``N``. The callable receives the open
+# connection and runs whatever statements it needs. The latest migration's
+# version is the "current" schema.
+#
+# History encoded:
+#
+#   v1 - Original baseline: create translations, scratchpad, settings,
+#        summaries, prompt_drafts, and remote_hosts (the latter without the
+#        columns added later via the old ad-hoc ALTER TABLE pattern).
+#   v2 - remote_hosts: add ``kind`` column.
+#   v3 - remote_hosts: add ``status``, ``last_poll_ms``, ``last_event_ms``,
+#        ``next_retry_ms`` columns (one ALTER each, since SQLite requires it).
+#
+# Existing users coming from the old code path may already have all the
+# columns but a ``user_version`` of 0. Each ALTER-style migration uses
+# ``try/except sqlite3.OperationalError`` internally so it is idempotent on
+# already-migrated databases. The runner then bumps ``user_version`` to the
+# latest version.
+
+# v1 is a list of individual statements rather than one ``executescript``
+# blob, because ``executescript`` issues an implicit COMMIT that breaks the
+# outer transaction we wrap migrations in.
+_MIGRATION_V1_STMTS: list[str] = [
+    """CREATE TABLE IF NOT EXISTS translations (
+        source_hash  TEXT NOT NULL,
+        target_lang  TEXT NOT NULL,
+        source_text  TEXT NOT NULL,
+        translation  TEXT NOT NULL,
+        model        TEXT NOT NULL,
+        created_at   INTEGER NOT NULL,
+        PRIMARY KEY (source_hash, target_lang)
+    )""",
+    "CREATE INDEX IF NOT EXISTS idx_tr_created ON translations(created_at)",
+    """CREATE TABLE IF NOT EXISTS scratchpad (
+        id           INTEGER PRIMARY KEY AUTOINCREMENT,
+        action       TEXT NOT NULL,
+        source_text  TEXT,
+        source_turn  TEXT,
+        result       TEXT NOT NULL,
+        model        TEXT,
+        session_id   TEXT,
+        created_at   INTEGER NOT NULL
+    )""",
+    "CREATE INDEX IF NOT EXISTS idx_sp_created ON scratchpad(created_at)",
+    "CREATE INDEX IF NOT EXISTS idx_sp_session ON scratchpad(session_id)",
+    """CREATE TABLE IF NOT EXISTS settings (
+        key    TEXT PRIMARY KEY,
+        value  TEXT NOT NULL
+    )""",
+    """CREATE TABLE IF NOT EXISTS summaries (
+        content_hash  TEXT PRIMARY KEY,
+        session_id    TEXT NOT NULL,
+        summary       TEXT NOT NULL,
+        model         TEXT NOT NULL,
+        token_in      INTEGER,
+        token_out     INTEGER,
+        created_at    INTEGER NOT NULL
+    )""",
+    "CREATE INDEX IF NOT EXISTS idx_sum_session ON summaries(session_id)",
+    """CREATE TABLE IF NOT EXISTS prompt_drafts (
+        id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+        bucket             TEXT NOT NULL,
+        session_id         TEXT NOT NULL,
+        source_event_uuid  TEXT,
+        mode               TEXT NOT NULL,
+        context_mode       TEXT NOT NULL,
+        rough_input        TEXT NOT NULL,
+        generated_prompt   TEXT NOT NULL,
+        improvement_notes  TEXT,
+        context_used       TEXT,
+        context_chars      INTEGER,
+        model              TEXT,
+        created_at         INTEGER NOT NULL,
+        updated_at         INTEGER NOT NULL
+    )""",
+    "CREATE INDEX IF NOT EXISTS idx_pd_session ON prompt_drafts(session_id)",
+    "CREATE INDEX IF NOT EXISTS idx_pd_created ON prompt_drafts(created_at)",
+    """CREATE TABLE IF NOT EXISTS remote_hosts (
+        id              INTEGER PRIMARY KEY AUTOINCREMENT,
+        name            TEXT NOT NULL UNIQUE,
+        host            TEXT NOT NULL,
+        port            INTEGER NOT NULL DEFAULT 22,
+        username        TEXT NOT NULL,
+        key_path        TEXT,
+        projects_path   TEXT,
+        home_dir        TEXT,
+        platform        TEXT,
+        enabled         INTEGER NOT NULL DEFAULT 1,
+        last_synced_ms  INTEGER,
+        last_error      TEXT,
+        created_at      INTEGER NOT NULL,
+        updated_at      INTEGER NOT NULL
+    )""",
+    "CREATE INDEX IF NOT EXISTS idx_rh_enabled ON remote_hosts(enabled)",
+]
+
+
+def _migration_v1(conn: sqlite3.Connection) -> None:
+    for stmt in _MIGRATION_V1_STMTS:
+        conn.execute(stmt)
+
+
+def _safe_alter(conn: sqlite3.Connection, stmt: str) -> None:
+    """Run an ALTER TABLE that's a no-op if the column already exists."""
+    try:
+        conn.execute(stmt)
+    except sqlite3.OperationalError as exc:
+        # SQLite raises OperationalError("duplicate column name: ...") when
+        # the column is already there. Treat as already-applied.
+        if "duplicate column name" in str(exc).lower():
+            return
+        raise
+
+
+def _migration_v2(conn: sqlite3.Connection) -> None:
+    _safe_alter(
+        conn,
+        "ALTER TABLE remote_hosts ADD COLUMN kind TEXT NOT NULL DEFAULT 'ssh'",
+    )
+
+
+def _migration_v3(conn: sqlite3.Connection) -> None:
+    for stmt in (
+        "ALTER TABLE remote_hosts ADD COLUMN status TEXT",
+        "ALTER TABLE remote_hosts ADD COLUMN last_poll_ms INTEGER",
+        "ALTER TABLE remote_hosts ADD COLUMN last_event_ms INTEGER",
+        "ALTER TABLE remote_hosts ADD COLUMN next_retry_ms INTEGER",
+    ):
+        _safe_alter(conn, stmt)
+
+
+# Ordered list of (version, sql_or_callable, description). The last entry's
+# version number IS the current schema version.
+MIGRATIONS: list[tuple[int, Callable[[sqlite3.Connection], None], str]] = [
+    (1, _migration_v1, "initial schema"),
+    (2, _migration_v2, "remote_hosts: add kind"),
+    (
+        3,
+        _migration_v3,
+        "remote_hosts: add status, last_poll_ms, last_event_ms, next_retry_ms",
+    ),
+]
+
+
+def _latest_version() -> int:
+    return MIGRATIONS[-1][0] if MIGRATIONS else 0
+
+
+def schema_version() -> int:
+    """Return the current ``PRAGMA user_version`` of the DB."""
     with _lock, _conn() as c:
-        c.executescript(
-            """
-            CREATE TABLE IF NOT EXISTS translations (
-                source_hash  TEXT NOT NULL,
-                target_lang  TEXT NOT NULL,
-                source_text  TEXT NOT NULL,
-                translation  TEXT NOT NULL,
-                model        TEXT NOT NULL,
-                created_at   INTEGER NOT NULL,
-                PRIMARY KEY (source_hash, target_lang)
-            );
-            CREATE INDEX IF NOT EXISTS idx_tr_created ON translations(created_at);
+        row = c.execute("PRAGMA user_version").fetchone()
+        return int(row[0]) if row is not None else 0
 
-            CREATE TABLE IF NOT EXISTS scratchpad (
-                id           INTEGER PRIMARY KEY AUTOINCREMENT,
-                action       TEXT NOT NULL,
-                source_text  TEXT,
-                source_turn  TEXT,
-                result       TEXT NOT NULL,
-                model        TEXT,
-                session_id   TEXT,
-                created_at   INTEGER NOT NULL
-            );
-            CREATE INDEX IF NOT EXISTS idx_sp_created ON scratchpad(created_at);
-            CREATE INDEX IF NOT EXISTS idx_sp_session ON scratchpad(session_id);
 
-            CREATE TABLE IF NOT EXISTS settings (
-                key    TEXT PRIMARY KEY,
-                value  TEXT NOT NULL
-            );
+def _backup_db(target_version: int) -> Path | None:
+    """Copy the live DB next to itself with a versioned suffix. No-op if the
+    DB file does not exist yet (fresh install)."""
+    if not DB_PATH.exists():
+        return None
+    iso = _dt.datetime.now().replace(microsecond=0).isoformat().replace(":", "-")
+    backup = DB_PATH.with_name(
+        f"{DB_PATH.name}.backup-pre-v{target_version}-{iso}"
+    )
+    shutil.copy2(DB_PATH, backup)
+    return backup
 
-            CREATE TABLE IF NOT EXISTS summaries (
-                content_hash  TEXT PRIMARY KEY,
-                session_id    TEXT NOT NULL,
-                summary       TEXT NOT NULL,
-                model         TEXT NOT NULL,
-                token_in      INTEGER,
-                token_out     INTEGER,
-                created_at    INTEGER NOT NULL
-            );
-            CREATE INDEX IF NOT EXISTS idx_sum_session ON summaries(session_id);
 
-            CREATE TABLE IF NOT EXISTS prompt_drafts (
-                id                 INTEGER PRIMARY KEY AUTOINCREMENT,
-                bucket             TEXT NOT NULL,
-                session_id         TEXT NOT NULL,
-                source_event_uuid  TEXT,
-                mode               TEXT NOT NULL,
-                context_mode       TEXT NOT NULL,
-                rough_input        TEXT NOT NULL,
-                generated_prompt   TEXT NOT NULL,
-                improvement_notes  TEXT,
-                context_used       TEXT,
-                context_chars      INTEGER,
-                model              TEXT,
-                created_at         INTEGER NOT NULL,
-                updated_at         INTEGER NOT NULL
-            );
-            CREATE INDEX IF NOT EXISTS idx_pd_session ON prompt_drafts(session_id);
-            CREATE INDEX IF NOT EXISTS idx_pd_created ON prompt_drafts(created_at);
+def init() -> None:
+    """Create the DB if needed and run any pending migrations.
 
-            CREATE TABLE IF NOT EXISTS remote_hosts (
-                id              INTEGER PRIMARY KEY AUTOINCREMENT,
-                name            TEXT NOT NULL UNIQUE,
-                host            TEXT NOT NULL,
-                port            INTEGER NOT NULL DEFAULT 22,
-                username        TEXT NOT NULL,
-                key_path        TEXT,
-                projects_path   TEXT,
-                home_dir        TEXT,
-                platform        TEXT,
-                enabled         INTEGER NOT NULL DEFAULT 1,
-                last_synced_ms  INTEGER,
-                last_error      TEXT,
-                kind            TEXT NOT NULL DEFAULT 'ssh',
-                created_at      INTEGER NOT NULL,
-                updated_at      INTEGER NOT NULL
-            );
-            CREATE INDEX IF NOT EXISTS idx_rh_enabled ON remote_hosts(enabled);
-            """
-        )
-        # Light migrations for newer columns (no-op if they exist)
-        for stmt in (
-            "ALTER TABLE remote_hosts ADD COLUMN kind TEXT NOT NULL DEFAULT 'ssh'",
-            "ALTER TABLE remote_hosts ADD COLUMN status TEXT",
-            "ALTER TABLE remote_hosts ADD COLUMN last_poll_ms INTEGER",
-            "ALTER TABLE remote_hosts ADD COLUMN last_event_ms INTEGER",
-            "ALTER TABLE remote_hosts ADD COLUMN next_retry_ms INTEGER",
-        ):
+    On a fresh install we create the file, leave ``user_version`` at 0, then
+    run all migrations sequentially in a single transaction. On an existing
+    DB we run only the migrations whose version is greater than the current
+    ``user_version`` -- after taking a backup. If any migration raises, the
+    transaction rolls back and the on-disk DB is unchanged; the
+    ``.backup-pre-vN`` file remains as a safety net for catastrophic cases.
+    """
+    latest = _latest_version()
+    fresh = not DB_PATH.exists()
+
+    with _lock:
+        if fresh:
+            # Create an empty file so subsequent connections share the same
+            # path. user_version defaults to 0 on a brand-new DB.
+            DB_PATH.touch()
+            _log.info("fresh DB at %s, running migrations 1..%d", DB_PATH, latest)
+
+        # Use isolation_level=None for manual transaction control. Python's
+        # sqlite3 driver otherwise auto-commits DDL and silently messes with
+        # explicit BEGIN/COMMIT, which we need to wrap the whole batch.
+        c = sqlite3.connect(DB_PATH, check_same_thread=False, isolation_level=None)
+        try:
+            current = int(c.execute("PRAGMA user_version").fetchone()[0])
+
+            if current >= latest:
+                _log.info("schema is up to date (version %d)", current)
+                return
+
+            pending = [m for m in MIGRATIONS if m[0] > current]
+            if not pending:
+                # Defensive: shouldn't happen given the check above.
+                _log.info("schema is up to date (version %d)", current)
+                return
+
+            if not fresh:
+                backup = _backup_db(pending[0][0])
+                if backup is not None:
+                    _log.info("backed up DB to %s", backup)
+
+            _log.info(
+                "applying %d migration(s): %s -> %d",
+                len(pending),
+                current,
+                latest,
+            )
+
             try:
-                c.execute(stmt)
-            except sqlite3.OperationalError:
-                pass
+                c.execute("BEGIN")
+                for version, body, desc in pending:
+                    _log.info("migration v%d: %s", version, desc)
+                    body(c)
+                # PRAGMA user_version doesn't accept parameter binding.
+                c.execute(f"PRAGMA user_version = {latest}")
+                c.execute("COMMIT")
+            except Exception:
+                try:
+                    c.execute("ROLLBACK")
+                except sqlite3.OperationalError:
+                    pass
+                _log.exception("migration failed; rolled back")
+                raise
+
+            _log.info("migrations complete; schema now at version %d", latest)
+        finally:
+            c.close()
 
 
 def get_summary(content_hash: str) -> dict[str, Any] | None:
