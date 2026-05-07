@@ -233,6 +233,36 @@ export const api = {
       "/api/remotes/discover-wsl",
       { method: "POST" }
     ),
+
+  // ---- Review Threads ----
+  reviewsList: (project_bucket?: string) => {
+    const q = new URLSearchParams();
+    if (project_bucket) q.set("project_bucket", project_bucket);
+    const path = `/api/reviews/threads${q.toString() ? "?" + q : ""}`;
+    return jsonFetch<ReviewThread[]>(path);
+  },
+  reviewsCreateThread: (req: ReviewThreadCreate) =>
+    jsonFetch<ReviewThread>("/api/reviews/threads", {
+      method: "POST",
+      body: JSON.stringify(req),
+    }),
+  reviewsPatchThread: (id: number, req: { name?: string; archived?: boolean }) =>
+    jsonFetch<ReviewThread>(`/api/reviews/threads/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify(req),
+    }),
+  reviewsListMessages: (threadId: number) =>
+    jsonFetch<ReviewMessage[]>(`/api/reviews/threads/${threadId}/messages`),
+  reviewsPreview: (req: ReviewPreviewRequest) =>
+    jsonFetch<ReviewPreview>("/api/reviews/preview", {
+      method: "POST",
+      body: JSON.stringify(req),
+    }),
+  reviewsSend: (req: ReviewSendRequest) =>
+    jsonFetch<ReviewMessage>("/api/reviews/send", {
+      method: "POST",
+      body: JSON.stringify(req),
+    }),
 };
 
 export interface WslDistroInfo {
@@ -368,4 +398,94 @@ export interface PromptDraft {
   model: string | null;
   created_at: number;
   updated_at: number;
+}
+
+// ===== Review Threads =====
+
+export type ReviewerMode = "critical" | "prompt_coach";
+
+export interface ReviewThread {
+  id: number;
+  name: string;
+  provider: string;
+  project_bucket: string | null;
+  claude_session_id: string | null;
+  provider_session_id: string | null;
+  created_at: number;
+  updated_at: number;
+  archived_at: number | null;
+}
+
+export interface ReviewThreadCreate {
+  name: string;
+  project_bucket?: string | null;
+  claude_session_id?: string | null;
+  provider?: string;
+}
+
+export interface ReviewMessage {
+  id: number;
+  thread_id: number;
+  role: "user" | "reviewer" | string;
+  content: string;
+  source_session_id: string | null;
+  source_turn_uuid: string | null;
+  context_used_json: Record<string, unknown> | null;
+  evidence_used_json: Record<string, unknown> | null;
+  provider: string | null;
+  model: string | null;
+  estimated_tokens: number | null;
+  provider_tokens: number | null;
+  created_at: number;
+}
+
+export interface ReviewEvidenceFlags {
+  include_claude_turn: boolean;
+  include_git_status: boolean;
+  include_changed_files: boolean;
+  include_git_diff: boolean;
+  include_test_output: boolean;
+  include_build_output: boolean;
+}
+
+export interface ReviewPreviewRequest {
+  question: string;
+  reviewer_mode: ReviewerMode;
+  project_bucket?: string | null;
+  project_cwd?: string | null;
+  claude_session_id?: string | null;
+  claude_turn_uuid?: string | null;
+  claude_turn_role?: string | null;
+  claude_turn_text?: string | null;
+  test_output?: string | null;
+  build_output?: string | null;
+  evidence: ReviewEvidenceFlags;
+}
+
+export interface ReviewSecretHit {
+  label: string;
+  location: string;
+}
+
+export interface ReviewGitSummary {
+  is_repo: boolean;
+  branch: string | null;
+  ahead: number;
+  behind: number;
+  dirty_count: number;
+  diff_byte_count: number;
+  diff_truncated: boolean;
+}
+
+export interface ReviewPreview {
+  byte_count: number;
+  estimated_tokens: number;
+  git: ReviewGitSummary;
+  secret_hits: ReviewSecretHit[];
+  prompt_preview: string;
+}
+
+export interface ReviewSendRequest extends ReviewPreviewRequest {
+  thread_id: number;
+  secret_override?: boolean;
 }

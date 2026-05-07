@@ -12,14 +12,20 @@ import { liveStream, type LiveEvent } from "@/lib/sse";
 // Lazy-load heavy sheets so they don't ship in the initial bundle. SettingsSheet
 // pulls RemotesManager (~685 lines) with it; PromptWriter is the largest single
 // component (~716 lines) and pulls react-markdown/remark-gfm via its preview pane.
-// Suspense fallback is `null` because both are off-screen until their open flag
-// flips, so no fallback UI is ever visible to the user.
+// ReviewPanel pulls the review-thread UI; we keep it lazy for the same reason.
+// Suspense fallback is `null` because all three are off-screen until their open
+// flag flips, so no fallback UI is ever visible to the user.
 const SettingsSheet = React.lazy(() =>
   import("@/components/settings-sheet").then((m) => ({ default: m.SettingsSheet }))
 );
 const PromptWriter = React.lazy(() =>
   import("@/components/prompt-writer/prompt-writer").then((m) => ({
     default: m.PromptWriter,
+  }))
+);
+const ReviewPanel = React.lazy(() =>
+  import("@/components/review-panel/review-panel").then((m) => ({
+    default: m.ReviewPanel,
   }))
 );
 
@@ -35,6 +41,7 @@ export default function App() {
   const mergeTranslations = useApp((s) => s.mergeTranslations);
   const settingsOpen = useApp((s) => s.settingsOpen);
   const promptWriterOpen = useApp((s) => s.promptWriter.open);
+  const reviewPanelOpen = useApp((s) => s.reviewPanel.open);
   const setSettings = useApp((s) => s.setSettings);
   const setSessionLoading = useApp((s) => s.setSessionLoading);
   const clearSelection = useApp((s) => s.clearSelection);
@@ -158,6 +165,11 @@ export default function App() {
       <LazyOnce open={promptWriterOpen}>
         <React.Suspense fallback={null}>
           <PromptWriter />
+        </React.Suspense>
+      </LazyOnce>
+      <LazyOnce open={reviewPanelOpen}>
+        <React.Suspense fallback={null}>
+          <ReviewPanel />
         </React.Suspense>
       </LazyOnce>
       <Toaster position="bottom-right" theme={theme} richColors />

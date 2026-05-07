@@ -17,6 +17,7 @@ import {
   Coins,
   Filter as FilterIcon,
   Wand2,
+  ClipboardCheck,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -48,6 +49,7 @@ export function SessionToolbar() {
   const summaryOpen = useApp((s) => s.summaryOpen);
   const setSummaryOpen = useApp((s) => s.setSummaryOpen);
   const openPromptWriter = useApp((s) => s.openPromptWriter);
+  const openReviewPanel = useApp((s) => s.openReviewPanel);
 
   const [translateAll, setTranslateAll] = React.useState<{
     running: boolean;
@@ -259,6 +261,22 @@ export function SessionToolbar() {
           >
             <Wand2 className="h-3 w-3" />
             Write prompt
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            className="h-7"
+            title="Discuss this work with another reviewer (Codex)"
+            onClick={() =>
+              openReviewPanel({
+                sourceTurnUuid: null,
+                sourceTurnRole: null,
+                sourceTurnText: null,
+              })
+            }
+          >
+            <ClipboardCheck className="h-3 w-3" />
+            Review
           </Button>
           {translateAll?.running && (
             <span className="flex items-center gap-1.5 rounded bg-muted/60 px-2 py-0.5 text-[11px] tabular-nums">

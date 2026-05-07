@@ -4,6 +4,8 @@ import type {
   ProjectMeta,
   PromptWriterContextMode,
   PromptWriterMode,
+  ReviewEvidenceFlags,
+  ReviewerMode,
   ScratchpadItem,
   SessionFull,
   TranscriptEvent,
@@ -109,6 +111,35 @@ interface AppState {
     value: AppState["promptWriter"][K]
   ) => void;
   togglePromptItemExcluded: (id: string) => void;
+
+  // Review Threads panel (V1). The panel anchors to the Claude turn that
+  // opened it (sourceTurn*), so the reviewer always sees the work the user
+  // is asking about. We never auto-replay old review messages — short-term
+  // continuity is owned by the provider session id stored on the thread.
+  reviewPanel: {
+    open: boolean;
+    threadId: number | null;
+    sourceTurnUuid: string | null;
+    sourceTurnRole: string | null;
+    sourceTurnText: string | null;
+    reviewerMode: ReviewerMode;
+    question: string;
+    testOutput: string;
+    buildOutput: string;
+    evidence: ReviewEvidenceFlags;
+  };
+  openReviewPanel: (opts?: {
+    sourceTurnUuid?: string | null;
+    sourceTurnRole?: string | null;
+    sourceTurnText?: string | null;
+    threadId?: number | null;
+  }) => void;
+  closeReviewPanel: () => void;
+  setReviewPanelField: <K extends keyof AppState["reviewPanel"]>(
+    key: K,
+    value: AppState["reviewPanel"][K]
+  ) => void;
+  setReviewEvidence: (key: keyof ReviewEvidenceFlags, value: boolean) => void;
 }
 
 // Pull the persisted UI slice once on module init. `loadPersisted()` is
@@ -264,4 +295,57 @@ export const useApp = create<AppState>((set) => ({
         promptWriter: { ...s.promptWriter, excludedItemIds: Array.from(ex) },
       };
     }),
+
+  reviewPanel: {
+    open: false,
+    threadId: null,
+    sourceTurnUuid: null,
+    sourceTurnRole: null,
+    sourceTurnText: null,
+    reviewerMode: "critical",
+    question: "",
+    testOutput: "",
+    buildOutput: "",
+    evidence: {
+      include_claude_turn: true,
+      include_git_status: true,
+      include_changed_files: true,
+      include_git_diff: true,
+      include_test_output: true,
+      include_build_output: true,
+    },
+  },
+  openReviewPanel: (opts = {}) =>
+    set((s) => ({
+      reviewPanel: {
+        ...s.reviewPanel,
+        open: true,
+        threadId: opts.threadId !== undefined ? opts.threadId : s.reviewPanel.threadId,
+        sourceTurnUuid:
+          opts.sourceTurnUuid !== undefined
+            ? opts.sourceTurnUuid
+            : s.reviewPanel.sourceTurnUuid,
+        sourceTurnRole:
+          opts.sourceTurnRole !== undefined
+            ? opts.sourceTurnRole
+            : s.reviewPanel.sourceTurnRole,
+        sourceTurnText:
+          opts.sourceTurnText !== undefined
+            ? opts.sourceTurnText
+            : s.reviewPanel.sourceTurnText,
+      },
+    })),
+  closeReviewPanel: () =>
+    set((s) => ({
+      reviewPanel: { ...s.reviewPanel, open: false },
+    })),
+  setReviewPanelField: (key, value) =>
+    set((s) => ({ reviewPanel: { ...s.reviewPanel, [key]: value } })),
+  setReviewEvidence: (key, value) =>
+    set((s) => ({
+      reviewPanel: {
+        ...s.reviewPanel,
+        evidence: { ...s.reviewPanel.evidence, [key]: value },
+      },
+    })),
 }));

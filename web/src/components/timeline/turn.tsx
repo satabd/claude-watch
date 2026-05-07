@@ -1,7 +1,15 @@
 import * as React from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { Languages, Loader2, User, Bot, ExternalLink, Wand2 } from "lucide-react";
+import {
+  Languages,
+  Loader2,
+  User,
+  Bot,
+  ExternalLink,
+  Wand2,
+  ClipboardCheck,
+} from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger, TooltipProvider } from "@/components/ui/tooltip";
@@ -97,6 +105,7 @@ function TurnBody({ text, uuid, role }: { text: string; uuid: string; role: stri
   const showTr = useApp((s) => s.shownTranslated[uuid] ?? false);
   const setShowTr = useApp((s) => s.setShownTranslated);
   const openPromptWriter = useApp((s) => s.openPromptWriter);
+  const openReviewPanel = useApp((s) => s.openReviewPanel);
 
   const onToggle = async () => {
     if (showTr) {
@@ -166,6 +175,29 @@ function TurnBody({ text, uuid, role }: { text: string; uuid: string; role: stri
             <TooltipContent>Write better prompt from this turn</TooltipContent>
           </Tooltip>
         </TooltipProvider>
+        {role === "assistant" && (
+          <TooltipProvider>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  onClick={() =>
+                    openReviewPanel({
+                      sourceTurnUuid: uuid,
+                      sourceTurnRole: role,
+                      sourceTurnText: text,
+                    })
+                  }
+                  className="h-6 w-6"
+                >
+                  <ClipboardCheck className="h-3 w-3" />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>Send this turn to a reviewer</TooltipContent>
+            </Tooltip>
+          </TooltipProvider>
+        )}
       </div>
       {showTr && translated ? (
         <div dir="rtl" className="prose-msg font-arabic">
