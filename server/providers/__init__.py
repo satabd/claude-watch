@@ -118,3 +118,22 @@ def resolve(provider: str, tier: str = "fast") -> tuple[ProviderFn, str | None]:
         raise ValueError(f"unknown provider: {provider}")
     model = DEFAULT_MODELS.get(provider, {}).get(tier)
     return PROVIDERS[provider], model
+
+
+# ---------------------------------------------------------------------------
+# Review-mode providers
+# ---------------------------------------------------------------------------
+#
+# A separate dispatch table for the Review Threads feature. Each entry is a
+# coroutine that takes ``(prompt, *, session_id_in, model)`` and returns a
+# provider-specific ``Result`` dataclass. Codex is the only V1 reviewer, but
+# we keep the indirection so adding Gemini / Claude self-review later is
+# additive (new provider module + register it here, no churn elsewhere).
+
+REVIEW_PROVIDERS: dict[str, Callable[..., Awaitable]] = {
+    "codex": codex_provider.run_review,
+}
+
+
+def is_review_provider(name: str) -> bool:
+    return name in REVIEW_PROVIDERS

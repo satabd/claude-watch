@@ -165,6 +165,49 @@ def _migration_v3(conn: sqlite3.Connection) -> None:
         _safe_alter(conn, stmt)
 
 
+# v4 — Review Threads. Two new tables for the reviewer-pair workflow: a
+# user discusses a Claude Code result with another LLM (Codex/Gemini/...) to
+# critique it and write the next prompt. Threads are forward-focused — old
+# messages stay in the DB for display/search/audit but are not auto-replayed
+# to the reviewer.
+_MIGRATION_V4_STMTS: list[str] = [
+    """CREATE TABLE IF NOT EXISTS review_threads (
+        id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+        name                 TEXT NOT NULL,
+        provider             TEXT NOT NULL,
+        project_bucket       TEXT,
+        claude_session_id    TEXT,
+        provider_session_id  TEXT,
+        created_at           INTEGER NOT NULL,
+        updated_at           INTEGER NOT NULL,
+        archived_at          INTEGER
+    )""",
+    "CREATE INDEX IF NOT EXISTS idx_rt_bucket ON review_threads(project_bucket, updated_at DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_rt_active ON review_threads(archived_at, updated_at DESC)",
+    """CREATE TABLE IF NOT EXISTS review_messages (
+        id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+        thread_id            INTEGER NOT NULL REFERENCES review_threads(id) ON DELETE CASCADE,
+        role                 TEXT NOT NULL,
+        content              TEXT NOT NULL,
+        source_session_id    TEXT,
+        source_turn_uuid     TEXT,
+        context_used_json    TEXT,
+        evidence_used_json   TEXT,
+        provider             TEXT,
+        model                TEXT,
+        estimated_tokens     INTEGER,
+        provider_tokens      INTEGER,
+        created_at           INTEGER NOT NULL
+    )""",
+    "CREATE INDEX IF NOT EXISTS idx_rm_thread ON review_messages(thread_id, created_at)",
+]
+
+
+def _migration_v4(conn: sqlite3.Connection) -> None:
+    for stmt in _MIGRATION_V4_STMTS:
+        conn.execute(stmt)
+
+
 # Ordered list of (version, sql_or_callable, description). The last entry's
 # version number IS the current schema version.
 MIGRATIONS: list[tuple[int, Callable[[sqlite3.Connection], None], str]] = [
@@ -175,6 +218,7 @@ MIGRATIONS: list[tuple[int, Callable[[sqlite3.Connection], None], str]] = [
         _migration_v3,
         "remote_hosts: add status, last_poll_ms, last_event_ms, next_retry_ms",
     ),
+    (4, _migration_v4, "review_threads + review_messages"),
 ]
 
 
@@ -642,3 +686,165 @@ def delete_scratchpad(item_id: int) -> bool:
     with _lock, _conn() as c:
         cur = c.execute("DELETE FROM scratchpad WHERE id = ?", (item_id,))
         return cur.rowcount > 0
+
+
+# ---------------------------------------------------------------------------
+# Review Threads (v4)
+# ---------------------------------------------------------------------------
+
+
+# Sentinel: distinguishes "leave column alone" from "set column to NULL" in
+# patch helpers. Caller passes ``None`` to clear a column or omits the kwarg
+# entirely (defaulted to _UNSET) to skip it.
+class _Sentinel:
+    pass
+
+
+_UNSET = _Sentinel()
+
+
+def create_review_thread(
+    *,
+    name: str,
+    provider: str,
+    project_bucket: str | None,
+    claude_session_id: str | None,
+) -> dict[str, Any]:
+    now = int(time.time() * 1000)
+    with _lock, _conn() as c:
+        cur = c.execute(
+            """INSERT INTO review_threads
+               (name, provider, project_bucket, claude_session_id, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (name, provider, project_bucket, claude_session_id, now, now),
+        )
+        thread_id = cur.lastrowid
+    return get_review_thread(thread_id)
+
+
+def get_review_thread(thread_id: int) -> dict[str, Any] | None:
+    with _lock, _conn() as c:
+        row = c.execute(
+            "SELECT * FROM review_threads WHERE id = ?", (thread_id,)
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def list_review_threads(
+    *, project_bucket: str | None = None, include_archived: bool = False
+) -> list[dict[str, Any]]:
+    with _lock, _conn() as c:
+        if project_bucket and not include_archived:
+            rows = c.execute(
+                "SELECT * FROM review_threads WHERE archived_at IS NULL AND project_bucket = ? "
+                "ORDER BY updated_at DESC",
+                (project_bucket,),
+            ).fetchall()
+        elif project_bucket:
+            rows = c.execute(
+                "SELECT * FROM review_threads WHERE project_bucket = ? "
+                "ORDER BY updated_at DESC",
+                (project_bucket,),
+            ).fetchall()
+        elif not include_archived:
+            rows = c.execute(
+                "SELECT * FROM review_threads WHERE archived_at IS NULL "
+                "ORDER BY updated_at DESC"
+            ).fetchall()
+        else:
+            rows = c.execute(
+                "SELECT * FROM review_threads ORDER BY updated_at DESC"
+            ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def update_review_thread(
+    thread_id: int,
+    *,
+    name: str | None = None,
+    provider_session_id: str | None | _Sentinel = _UNSET,
+    archived: bool | None = None,
+) -> dict[str, Any] | None:
+    """Patch a thread. Omit ``provider_session_id`` to leave it alone; pass
+    ``None`` explicitly to clear it; pass a string to replace it."""
+    fields: list[str] = []
+    params: list[Any] = []
+    if name is not None:
+        fields.append("name = ?")
+        params.append(name)
+    if provider_session_id is not _UNSET:
+        fields.append("provider_session_id = ?")
+        params.append(provider_session_id)
+    if archived is True:
+        fields.append("archived_at = ?")
+        params.append(int(time.time() * 1000))
+    elif archived is False:
+        fields.append("archived_at = NULL")
+    if not fields:
+        return get_review_thread(thread_id)
+    fields.append("updated_at = ?")
+    params.append(int(time.time() * 1000))
+    params.append(thread_id)
+    with _lock, _conn() as c:
+        c.execute(
+            f"UPDATE review_threads SET {', '.join(fields)} WHERE id = ?", params
+        )
+    return get_review_thread(thread_id)
+
+
+def add_review_message(
+    *,
+    thread_id: int,
+    role: str,
+    content: str,
+    source_session_id: str | None = None,
+    source_turn_uuid: str | None = None,
+    context_used_json: str | None = None,
+    evidence_used_json: str | None = None,
+    provider: str | None = None,
+    model: str | None = None,
+    estimated_tokens: int | None = None,
+    provider_tokens: int | None = None,
+) -> dict[str, Any]:
+    now = int(time.time() * 1000)
+    with _lock, _conn() as c:
+        cur = c.execute(
+            """INSERT INTO review_messages
+               (thread_id, role, content, source_session_id, source_turn_uuid,
+                context_used_json, evidence_used_json, provider, model,
+                estimated_tokens, provider_tokens, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                thread_id,
+                role,
+                content,
+                source_session_id,
+                source_turn_uuid,
+                context_used_json,
+                evidence_used_json,
+                provider,
+                model,
+                estimated_tokens,
+                provider_tokens,
+                now,
+            ),
+        )
+        msg_id = cur.lastrowid
+    return get_review_message(msg_id)
+
+
+def get_review_message(message_id: int) -> dict[str, Any] | None:
+    with _lock, _conn() as c:
+        row = c.execute(
+            "SELECT * FROM review_messages WHERE id = ?", (message_id,)
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def list_review_messages(thread_id: int) -> list[dict[str, Any]]:
+    with _lock, _conn() as c:
+        rows = c.execute(
+            "SELECT * FROM review_messages WHERE thread_id = ? ORDER BY created_at ASC",
+            (thread_id,),
+        ).fetchall()
+    return [dict(r) for r in rows]

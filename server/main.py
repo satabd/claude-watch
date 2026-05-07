@@ -22,7 +22,14 @@ from fastapi.staticfiles import StaticFiles  # noqa: E402
 
 from . import db  # noqa: E402
 from .remote_watcher import RemoteWatcherManager  # noqa: E402
-from .routes import actions, projects, prompt_writer, remotes as remotes_routes, settings as settings_routes  # noqa: E402
+from .routes import (  # noqa: E402
+    actions,
+    projects,
+    prompt_writer,
+    remotes as remotes_routes,
+    reviews as reviews_routes,
+    settings as settings_routes,
+)
 from .routes import stream as stream_routes  # noqa: E402
 from .watcher import WatcherService  # noqa: E402
 
@@ -61,6 +68,7 @@ app.include_router(actions.router)
 app.include_router(settings_routes.router)
 app.include_router(prompt_writer.router)
 app.include_router(remotes_routes.router)
+app.include_router(reviews_routes.router)
 app.include_router(stream_routes.make_router(watcher_service))
 
 
