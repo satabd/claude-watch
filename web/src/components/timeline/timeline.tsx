@@ -11,6 +11,9 @@ import { cn } from "@/lib/utils";
 
 export function Timeline() {
   const session = useApp((s) => s.session);
+  const selectedBucket = useApp((s) => s.selectedBucket);
+  const selectedSessionId = useApp((s) => s.selectedSessionId);
+  const sessionLoading = useApp((s) => s.sessionLoading);
   const filterQuery = useApp((s) => s.filterQuery);
   const filterRoles = useApp((s) => s.filterRoles);
   const filterTool = useApp((s) => s.filterTool);
@@ -119,8 +122,21 @@ export function Timeline() {
     sc.scrollTo({ top: 0, behavior: "smooth" });
   }, [getViewport]);
 
-  if (!session) {
+  // No selection at all → friendly start screen.
+  if (!selectedBucket || !selectedSessionId) {
     return <NoSessionSelected />;
+  }
+  // A selection is set but the session hasn't arrived yet, OR a different
+  // session is currently displayed (mid-transition). Render a skeleton so
+  // the user knows something is on its way and isn't confused by stale
+  // content from the previously-loaded session. The fall-through below
+  // narrows `session` to non-null for the rest of the function.
+  if (
+    !session ||
+    session.meta.bucket !== selectedBucket ||
+    session.meta.session_id !== selectedSessionId
+  ) {
+    return <TimelineSkeleton loading={sessionLoading || !session} />;
   }
 
   const q = filterQuery.trim().toLowerCase();
@@ -233,6 +249,51 @@ function ScrollNavButtons({
           </span>
         )}
       </button>
+    </div>
+  );
+}
+
+/** Lightweight skeleton shown while the selected session is being fetched.
+ *  Mirrors the rough rhythm of the real timeline (alternating user/assistant
+ *  blocks) so the layout doesn't reflow on arrival. */
+function TimelineSkeleton({ loading }: { loading: boolean }) {
+  return (
+    <div
+      role="status"
+      aria-label="Loading session"
+      className="flex flex-1 flex-col"
+    >
+      <div className="mx-auto flex w-full max-w-4xl flex-col gap-6 p-6 motion-safe:animate-pulse">
+        <div className="flex items-center gap-2 text-[11px] uppercase tracking-wider text-muted-foreground">
+          <div className="h-1.5 w-1.5 rounded-full bg-muted-foreground/40" />
+          {loading ? "Loading session…" : "Switching session…"}
+        </div>
+        {[
+          { role: "user", lines: 2 },
+          { role: "assistant", lines: 4 },
+          { role: "user", lines: 1 },
+          { role: "assistant", lines: 3 },
+        ].map((row, i) => (
+          <div
+            key={i}
+            className={cn(
+              "space-y-2 rounded-md border border-border/40 p-3",
+              row.role === "user" ? "bg-muted/20" : "bg-card/40"
+            )}
+          >
+            <div className="h-2.5 w-24 rounded bg-muted/60" />
+            {Array.from({ length: row.lines }).map((_, j) => (
+              <div
+                key={j}
+                className={cn(
+                  "h-2.5 rounded bg-muted/50",
+                  j === row.lines - 1 ? "w-2/3" : "w-full"
+                )}
+              />
+            ))}
+          </div>
+        ))}
+      </div>
     </div>
   );
 }

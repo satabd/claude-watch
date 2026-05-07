@@ -36,6 +36,8 @@ export default function App() {
   const settingsOpen = useApp((s) => s.settingsOpen);
   const promptWriterOpen = useApp((s) => s.promptWriter.open);
   const setSettings = useApp((s) => s.setSettings);
+  const setSessionLoading = useApp((s) => s.setSessionLoading);
+  const clearSelection = useApp((s) => s.clearSelection);
 
   // Apply theme class
   React.useEffect(() => {
@@ -49,17 +51,38 @@ export default function App() {
     api.getSettings().then(setSettings).catch(() => {});
   }, [setSettings]);
 
-  // Load selected session
+  // Load selected session. Sets `sessionLoading=true` while fetching so the
+  // Timeline can render a skeleton, and clears the selection on 404 so a
+  // stale persisted bucket/session doesn't leave the user stuck on a spinner.
   React.useEffect(() => {
     if (!selectedBucket || !selectedSessionId) {
       setSession(null);
+      setSessionLoading(false);
       return;
     }
+    let cancelled = false;
+    setSessionLoading(true);
     api
       .getSession(selectedBucket, selectedSessionId)
-      .then(setSession)
-      .catch(console.error);
-  }, [selectedBucket, selectedSessionId, setSession]);
+      .then((s) => {
+        if (cancelled) return;
+        setSession(s);
+      })
+      .catch((e) => {
+        if (cancelled) return;
+        // 404 / stale selection: drop it so we fall back to the no-session
+        // start screen instead of an indefinite skeleton.
+        console.warn("getSession failed; clearing selection", e);
+        clearSelection();
+      })
+      .finally(() => {
+        if (cancelled) return;
+        setSessionLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedBucket, selectedSessionId, setSession, setSessionLoading, clearSelection]);
 
   // After a session loads, pre-fetch any cached translations so the
   // per-turn translate toggle is instant for already-translated turns.

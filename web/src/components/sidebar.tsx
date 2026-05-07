@@ -24,20 +24,40 @@ export function Sidebar() {
   const selectedSessionId = useApp((s) => s.selectedSessionId);
   const selectSession = useApp((s) => s.selectSession);
   const setSettingsOpen = useApp((s) => s.setSettingsOpen);
-  const [loaded, setLoaded] = React.useState(false);
+  const projectsLoaded = useApp((s) => s.projectsLoaded);
+  const setProjectsLoaded = useApp((s) => s.setProjectsLoaded);
+  const clearSelection = useApp((s) => s.clearSelection);
 
   React.useEffect(() => {
     api
       .listProjects()
       .then(setProjects)
       .catch(console.error)
-      .finally(() => setLoaded(true));
+      .finally(() => setProjectsLoaded(true));
+    // Background poll: refresh data every 30s without flipping projectsLoaded
+    // back to false (the empty-state gate must stay stable once the first load
+    // resolved, otherwise the skeleton would flash periodically).
     const t = setInterval(
       () => api.listProjects().then(setProjects).catch(() => {}),
       30_000,
     );
     return () => clearInterval(t);
-  }, [setProjects]);
+  }, [setProjects, setProjectsLoaded]);
+
+  // Validate any persisted selection against the freshly-loaded project list.
+  // If the bucket+session_id pair is no longer present, drop the selection so
+  // the user lands on the no-session start screen instead of an indefinite
+  // load (App.tsx also handles the 404 path, but this short-circuits the
+  // wasted request and skeleton flash).
+  React.useEffect(() => {
+    if (!projectsLoaded || !selectedBucket || !selectedSessionId) return;
+    const exists = projects.some((p) =>
+      p.sessions.some(
+        (s) => s.bucket === selectedBucket && s.session_id === selectedSessionId
+      )
+    );
+    if (!exists) clearSelection();
+  }, [projectsLoaded, selectedBucket, selectedSessionId, projects, clearSelection]);
 
   const tree = React.useMemo(() => buildProjectTree(projects), [projects]);
 
@@ -45,11 +65,15 @@ export function Sidebar() {
     <aside className="flex h-full w-72 shrink-0 flex-col border-r border-border bg-card/40">
       <div className="flex h-9 shrink-0 items-center justify-between px-3 text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
         <span>Projects</span>
-        <span className="font-mono text-muted-foreground/70">{projects.length}</span>
+        <span className="font-mono text-muted-foreground/70">
+          {projectsLoaded ? projects.length : ""}
+        </span>
       </div>
       <ScrollArea className="flex-1 scrollbar-thin">
         <div className="space-y-0.5 p-1.5">
-          {loaded && projects.length === 0 ? (
+          {!projectsLoaded ? (
+            <SidebarSkeleton />
+          ) : projects.length === 0 ? (
             <SidebarEmptyState onOpenSettings={() => setSettingsOpen(true)} />
           ) : (
             tree.map((node) => (
@@ -65,6 +89,32 @@ export function Sidebar() {
         </div>
       </ScrollArea>
     </aside>
+  );
+}
+
+/** Subtle animated placeholder for the project tree on first load. Kept very
+ *  light — three fake project rows with two fake sessions each — so it
+ *  doesn't draw attention to itself if the fetch is fast. */
+function SidebarSkeleton() {
+  return (
+    <div
+      role="status"
+      aria-label="Loading projects"
+      className="space-y-2 px-1.5 py-1 motion-safe:animate-pulse"
+    >
+      {[0, 1, 2].map((i) => (
+        <div key={i} className="space-y-1">
+          <div className="flex items-center gap-1.5 py-1">
+            <div className="h-3 w-3 rounded bg-muted/70" />
+            <div className="h-3 flex-1 rounded bg-muted/70" />
+          </div>
+          <div className="ms-4 space-y-1">
+            <div className="h-2.5 w-3/4 rounded bg-muted/50" />
+            <div className="h-2.5 w-2/3 rounded bg-muted/50" />
+          </div>
+        </div>
+      ))}
+    </div>
   );
 }
 
@@ -113,11 +163,28 @@ function ProjectTreeNode({ node, selectedBucket, selectedSessionId, onSelect }: 
     isSelfSelected ||
     children.some((c) => containsSession(c, selectedBucket));
 
-  // Auto-open if anything below is active or if this is a top-level project.
-  const [open, setOpen] = React.useState<boolean>(depth === 0 || containsSelected);
+  // Open state is persisted in the store keyed by bucket. Falls back to the
+  // legacy heuristic (top-level open, contains-active open) when no entry is
+  // present so first-time users still get sensible defaults.
+  const persistedOpen = useApp((s) => s.expandedNodes[project.bucket]);
+  const setNodeExpanded = useApp((s) => s.setNodeExpanded);
+  const open =
+    persistedOpen !== undefined ? persistedOpen : depth === 0 || containsSelected;
+  // Auto-expand on first activation only — i.e. when the user hasn't yet
+  // expressed an opinion on this node (`persistedOpen === undefined`). Once
+  // they explicitly collapse it, we honour that even while a descendant is
+  // active; otherwise the effect would immediately re-expand the node and
+  // the click would silently no-op.
   React.useEffect(() => {
-    if (containsSelected) setOpen(true);
-  }, [containsSelected]);
+    if (containsSelected && persistedOpen === undefined) {
+      setNodeExpanded(project.bucket, true);
+    }
+  }, [containsSelected, persistedOpen, project.bucket, setNodeExpanded]);
+  const setOpen = (next: boolean | ((prev: boolean) => boolean)) =>
+    setNodeExpanded(
+      project.bucket,
+      typeof next === "function" ? next(open) : next
+    );
 
   const sessions = project.sessions.slice(0, 12);
   const hasChildren = children.length > 0;

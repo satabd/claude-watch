@@ -8,17 +8,35 @@ import type {
   SessionFull,
   TranscriptEvent,
 } from "@/lib/api";
+import { loadPersisted } from "@/lib/persisted-state";
 
 interface AppState {
   projects: ProjectMeta[];
   setProjects: (p: ProjectMeta[]) => void;
+  /** True after the first listProjects() call resolves (success or failure).
+   *  Sidebar uses this to gate the "no projects" empty state so it doesn't
+   *  flash before data arrives. */
+  projectsLoaded: boolean;
+  setProjectsLoaded: (b: boolean) => void;
 
   selectedBucket: string | null;
   selectedSessionId: string | null;
   selectSession: (bucket: string, sessionId: string) => void;
+  /** Clear current selection. Used when a persisted/stale selection points at
+   *  a session that no longer exists, or when the user explicitly deselects. */
+  clearSelection: () => void;
+
+  /** Sidebar tree: bucket -> open. Persisted across reloads. */
+  expandedNodes: Record<string, boolean>;
+  setNodeExpanded: (bucket: string, open: boolean) => void;
 
   session: SessionFull | null;
   setSession: (s: SessionFull | null) => void;
+  /** True while api.getSession() is in flight for the current selection.
+   *  Timeline uses this together with a session-id mismatch check to render
+   *  a skeleton during transitions. */
+  sessionLoading: boolean;
+  setSessionLoading: (b: boolean) => void;
   appendEvent: (bucket: string, sessionId: string, ev: TranscriptEvent) => void;
 
   scratchpadOpen: boolean;
@@ -93,17 +111,32 @@ interface AppState {
   togglePromptItemExcluded: (id: string) => void;
 }
 
+// Pull the persisted UI slice once on module init. `loadPersisted()` is
+// defensive — unknown / mistyped fields are dropped, so the worst case is
+// `{}` and we fall back to defaults.
+const _persisted = loadPersisted();
+
 export const useApp = create<AppState>((set) => ({
   projects: [],
   setProjects: (projects) => set({ projects }),
+  projectsLoaded: false,
+  setProjectsLoaded: (projectsLoaded) => set({ projectsLoaded }),
 
-  selectedBucket: null,
-  selectedSessionId: null,
+  selectedBucket: _persisted.selectedBucket ?? null,
+  selectedSessionId: _persisted.selectedSessionId ?? null,
   selectSession: (bucket, sessionId) =>
     set({ selectedBucket: bucket, selectedSessionId: sessionId }),
+  clearSelection: () =>
+    set({ selectedBucket: null, selectedSessionId: null, session: null, sessionLoading: false }),
+
+  expandedNodes: _persisted.expandedNodes ?? {},
+  setNodeExpanded: (bucket, open) =>
+    set((s) => ({ expandedNodes: { ...s.expandedNodes, [bucket]: open } })),
 
   session: null,
   setSession: (session) => set({ session }),
+  sessionLoading: false,
+  setSessionLoading: (sessionLoading) => set({ sessionLoading }),
   appendEvent: (bucket, sessionId, ev) =>
     set((s) => {
       if (!s.session) return s;
@@ -123,7 +156,7 @@ export const useApp = create<AppState>((set) => ({
       };
     }),
 
-  scratchpadOpen: false,
+  scratchpadOpen: _persisted.scratchpadOpen ?? false,
   toggleScratchpad: () => set((s) => ({ scratchpadOpen: !s.scratchpadOpen })),
 
   scratchpadItems: [],
@@ -181,7 +214,11 @@ export const useApp = create<AppState>((set) => ({
   promptWriter: {
     open: false,
     expanded: false,
-    mode: "improve",
+    // Restore last-used writer mode. contextMode is intentionally NOT
+    // restored — auto-resolution must run fresh each open so a stale
+    // "full_session" choice can't surprise the user with a heavy / costly
+    // context.
+    mode: _persisted.promptWriterMode ?? "improve",
     contextMode: "auto",
     rough: "",
     sourceEventUuid: null,

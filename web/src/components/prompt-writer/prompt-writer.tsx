@@ -509,7 +509,11 @@ export function PromptWriter() {
                 ) : (
                   <Sparkles className="h-3 w-3" />
                 )}
-                {draft ? "Regenerate" : "Generate"}
+                {busy === "generate"
+                  ? "Generating…"
+                  : draft
+                  ? "Regenerate"
+                  : "Generate"}
               </Button>
               {pw.rough && (
                 <Button
@@ -660,18 +664,25 @@ export function PromptWriter() {
                   ) : (
                     <Wand2 className="h-3 w-3" />
                   )}
-                  Refine
+                  {busy === "refine" ? "Refining…" : "Refine"}
                 </Button>
               </div>
             </div>
           )}
 
-          {!draft && (
-            <div className="px-4 py-8 text-center text-xs text-muted-foreground">
-              Choose a mode, write your idea, click Generate. Use{" "}
-              <kbd className="rounded border bg-muted px-1 font-mono">⌘ Enter</kbd> as a shortcut.
-            </div>
-          )}
+          {!draft &&
+            (busy === "generate" ? (
+              <div className="flex items-center justify-center gap-2 px-4 py-8 text-xs text-muted-foreground">
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                <span>Generating prompt — this can take up to ~15s.</span>
+              </div>
+            ) : (
+              <div className="px-4 py-8 text-center text-xs text-muted-foreground">
+                Choose a mode, write your idea, click Generate. Use{" "}
+                <kbd className="rounded border bg-muted px-1 font-mono">⌘ Enter</kbd>{" "}
+                as a shortcut.
+              </div>
+            ))}
         </div>
       </SheetContent>
     </Sheet>
