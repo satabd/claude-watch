@@ -127,5 +127,55 @@ def test_cascade_delete_messages_when_thread_deleted(isolated_db):
     assert db.list_review_messages(t["id"]) == []
 
 
-def test_schema_is_at_v4(isolated_db):
-    assert db.schema_version() == 4
+def test_schema_is_at_v5(isolated_db):
+    assert db.schema_version() == 5
+
+
+def test_skill_metadata_round_trips(isolated_db):
+    """The send route stores (skill_id, version) so a future skill change
+    forces a fresh provider session. Verify the helper persists each
+    field independently and respects the ``_UNSET`` sentinel."""
+    t = db.create_review_thread(
+        name="t", provider="codex", project_bucket=None, claude_session_id=None
+    )
+    # Initial row has the new columns as NULL.
+    assert t["active_skill_id"] is None
+    assert t["provider_session_skill_id"] is None
+    assert t["provider_session_skill_version"] is None
+
+    # Simulate a /send completing under the quick_review skill v1.
+    db.update_review_thread(
+        t["id"],
+        provider_session_id="sid-A",
+        active_skill_id="quick_review",
+        provider_session_skill_id="quick_review",
+        provider_session_skill_version=1,
+    )
+    after = db.get_review_thread(t["id"])
+    assert after["provider_session_id"] == "sid-A"
+    assert after["active_skill_id"] == "quick_review"
+    assert after["provider_session_skill_id"] == "quick_review"
+    assert after["provider_session_skill_version"] == 1
+
+    # Patching only the name must NOT clobber the skill metadata
+    # (sentinel-default: omitted means "leave alone").
+    db.update_review_thread(t["id"], name="renamed")
+    after2 = db.get_review_thread(t["id"])
+    assert after2["name"] == "renamed"
+    assert after2["provider_session_skill_id"] == "quick_review"
+    assert after2["provider_session_skill_version"] == 1
+
+    # Switching the active skill: the route bumps active_skill_id and the
+    # session-pair on success. Verify each field updates independently.
+    db.update_review_thread(
+        t["id"],
+        active_skill_id="critical_review",
+        provider_session_id="sid-B",
+        provider_session_skill_id="critical_review",
+        provider_session_skill_version=2,
+    )
+    after3 = db.get_review_thread(t["id"])
+    assert after3["active_skill_id"] == "critical_review"
+    assert after3["provider_session_id"] == "sid-B"
+    assert after3["provider_session_skill_id"] == "critical_review"
+    assert after3["provider_session_skill_version"] == 2

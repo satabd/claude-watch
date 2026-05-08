@@ -235,6 +235,8 @@ export const api = {
     ),
 
   // ---- Review Threads ----
+  reviewsListSkills: () =>
+    jsonFetch<ReviewSkillsList>("/api/reviews/skills"),
   reviewsList: (project_bucket?: string) => {
     const q = new URLSearchParams();
     if (project_bucket) q.set("project_bucket", project_bucket);
@@ -402,7 +404,23 @@ export interface PromptDraft {
 
 // ===== Review Threads =====
 
-export type ReviewerMode = "critical" | "prompt_coach";
+/** Legacy alias — older callers said "Reviewer mode". The new vocabulary
+ *  is "Review Skill"; the typed values map 1:1 onto the backend SkillId. */
+export type ReviewerMode = SkillId;
+
+export type SkillId = "quick_review" | "critical_review" | "prompt_coach";
+
+export interface ReviewSkill {
+  id: SkillId;
+  label: string;
+  purpose: string;
+}
+
+export interface ReviewSkillsList {
+  default_skill_id: SkillId;
+  skill_version: number;
+  skills: ReviewSkill[];
+}
 
 export interface ReviewThread {
   id: number;
@@ -411,6 +429,14 @@ export interface ReviewThread {
   project_bucket: string | null;
   claude_session_id: string | null;
   provider_session_id: string | null;
+  /** The skill the thread was last sent under (or null for legacy
+   *  threads that predate the skill system). */
+  active_skill_id: SkillId | null;
+  /** The (skill_id, version) pair the stored Codex provider session was
+   *  created with. The send route refuses to resume a session whose
+   *  pair doesn't match the current request. */
+  provider_session_skill_id: SkillId | null;
+  provider_session_skill_version: number | null;
   created_at: number;
   updated_at: number;
   archived_at: number | null;
@@ -450,7 +476,12 @@ export interface ReviewEvidenceFlags {
 
 export interface ReviewPreviewRequest {
   question: string;
-  reviewer_mode: ReviewerMode;
+  /** Preferred. Backend will fall back to ``reviewer_mode`` for legacy
+   *  callers; new code should always send ``skill_id``. */
+  skill_id: SkillId;
+  /** Legacy field; kept for back-compat. New callers should leave it
+   *  unset and use ``skill_id`` instead. */
+  reviewer_mode?: ReviewerMode;
   project_bucket?: string | null;
   project_cwd?: string | null;
   claude_session_id?: string | null;
@@ -483,6 +514,8 @@ export interface ReviewPreview {
   git: ReviewGitSummary;
   secret_hits: ReviewSecretHit[];
   prompt_preview: string;
+  skill_id: SkillId;
+  skill_version: number;
 }
 
 export interface ReviewSendRequest extends ReviewPreviewRequest {

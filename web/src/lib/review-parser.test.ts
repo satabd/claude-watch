@@ -222,6 +222,44 @@ Make sure existing tests still pass.
   });
 });
 
+describe("parseCriticalReview (heading variants — robust normalization)", () => {
+  it("handles bold-around-numbered legacy heading **6. NEXT PROMPT FOR CLAUDE CODE:**", () => {
+    const text = `VERDICT:
+Looks fine.
+
+**6. NEXT PROMPT FOR CLAUDE CODE:**
+Add a smoke test for the empty-list path.
+`;
+    const r = parseCriticalReview(text);
+    expect(r.parsed).toBe(true);
+    expect(r.nextPrompt).toBe("Add a smoke test for the empty-list path.");
+  });
+
+  it("handles markdown heading legacy form ### NEXT PROMPT FOR CLAUDE CODE", () => {
+    const text = `VERDICT:
+Looks fine.
+
+### NEXT PROMPT FOR CLAUDE CODE
+Restructure the diff.
+`;
+    const r = parseCriticalReview(text);
+    expect(r.parsed).toBe(true);
+    expect(r.nextPrompt).toBe("Restructure the diff.");
+  });
+
+  it("handles numbered legacy form '6. NEXT PROMPT FOR CLAUDE CODE:'", () => {
+    const text = `VERDICT:
+Looks fine.
+
+6. NEXT PROMPT FOR CLAUDE CODE:
+Tighten the guard.
+`;
+    const r = parseCriticalReview(text);
+    expect(r.parsed).toBe(true);
+    expect(r.nextPrompt).toBe("Tighten the guard.");
+  });
+});
+
 describe("parseCriticalReview (legacy format back-compat)", () => {
   it("maps KEY FINDINGS → why and RECOMMENDED NEXT STEP → nextAction", () => {
     const r = parseCriticalReview(SAMPLE_CRITICAL_LEGACY);

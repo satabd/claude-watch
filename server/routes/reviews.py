@@ -12,8 +12,6 @@ from __future__ import annotations
 import json
 import logging
 from pathlib import Path
-from typing import Literal
-
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
@@ -24,8 +22,13 @@ from ..providers.codex_provider import CodexResumeFailed
 from ..review_packet import (
     PacketEvidence,
     PacketInputs,
-    REVIEWER_MODES,
     build_packet,
+)
+from ..review_skills import (
+    DEFAULT_SKILL_ID,
+    SKILL_VERSION,
+    SKILLS,
+    resolve_skill_id,
 )
 
 _log = logging.getLogger("watcher.routes.reviews")
@@ -45,6 +48,9 @@ class ThreadOut(BaseModel):
     project_bucket: str | None
     claude_session_id: str | None
     provider_session_id: str | None
+    active_skill_id: str | None = None
+    provider_session_skill_id: str | None = None
+    provider_session_skill_version: int | None = None
     created_at: int
     updated_at: int
     archived_at: int | None
@@ -87,12 +93,17 @@ class PacketEvidenceIn(BaseModel):
     include_build_output: bool = True
 
 
-ReviewerMode = Literal["critical", "prompt_coach"]
-
-
 class PreviewIn(BaseModel):
+    """Inputs for both /preview and /send (extended via SendIn).
+
+    ``skill_id`` is preferred. ``reviewer_mode`` is accepted for
+    backward compatibility with older clients ("critical" maps to
+    ``critical_review``, "prompt_coach" to ``prompt_coach``); it's
+    silently translated by :func:`resolve_skill_id`."""
+
     question: str = Field(..., min_length=1, max_length=20_000)
-    reviewer_mode: ReviewerMode = "critical"
+    skill_id: str | None = None
+    reviewer_mode: str | None = None
     project_bucket: str | None = None
     project_cwd: str | None = None
     claude_session_id: str | None = None
@@ -125,6 +136,23 @@ class PreviewOut(BaseModel):
     git: GitSummary
     secret_hits: list[SecretHitOut]
     prompt_preview: str  # first ~1 KB so the UI can show what will be sent
+    # Echo back the skill the request was resolved to (after legacy-mode
+    # translation), so the UI can confirm what behavior preset will
+    # actually be used.
+    skill_id: str
+    skill_version: int
+
+
+class SkillOut(BaseModel):
+    id: str
+    label: str
+    purpose: str
+
+
+class SkillsListOut(BaseModel):
+    default_skill_id: str
+    skill_version: int
+    skills: list[SkillOut]
 
 
 class SendIn(PreviewIn):
@@ -181,9 +209,17 @@ def _resolve_cwd_from_bucket(bucket: str | None) -> Path | None:
 
 async def _build_packet_from_request(req: PreviewIn, secret_override: bool):
     """Resolve the cwd, capture git, build the packet. Shared between
-    /preview and /send so they always see the same evidence shape."""
-    if req.reviewer_mode not in REVIEWER_MODES:
-        raise HTTPException(400, f"unknown reviewer_mode: {req.reviewer_mode}")
+    /preview and /send so they always see the same evidence shape.
+
+    Returns ``(packet, git, skill_id)`` — skill_id is the resolved skill
+    after legacy ``reviewer_mode`` translation, so callers (notably the
+    /send route) can compare it against the thread's stored
+    provider_session_skill_id to decide whether to resume."""
+    skill_id = resolve_skill_id(req.skill_id, req.reviewer_mode)
+    if skill_id not in SKILLS:
+        # resolve_skill_id always returns a known id, but defensively
+        # short-circuit a 400 if the registry is somehow inconsistent.
+        raise HTTPException(400, f"unknown skill_id: {skill_id!r}")
 
     # Prefer an explicit project_cwd from the client (matches what the user
     # sees in the UI); fall back to deriving from the bucket.
@@ -197,7 +233,7 @@ async def _build_packet_from_request(req: PreviewIn, secret_override: bool):
 
     inputs = PacketInputs(
         question=req.question,
-        reviewer_mode=req.reviewer_mode,
+        skill_id=skill_id,
         project_cwd=str(cwd) if cwd else None,
         claude_session_id=req.claude_session_id,
         claude_turn_uuid=req.claude_turn_uuid,
@@ -208,7 +244,7 @@ async def _build_packet_from_request(req: PreviewIn, secret_override: bool):
         evidence=PacketEvidence(**req.evidence.model_dump()),
     )
     packet = build_packet(inputs, git, secret_override=secret_override)
-    return packet, git
+    return packet, git, skill_id
 
 
 # ---------------------------------------------------------------------------
@@ -257,9 +293,26 @@ def list_messages(thread_id: int) -> list[MessageOut]:
     return [_row_to_message(r) for r in rows]
 
 
+@router.get("/skills", response_model=SkillsListOut)
+def list_skills() -> SkillsListOut:
+    """Expose the Skill registry to the frontend so the UI can render
+    pills with the canonical labels and the user can pick one. Lightweight
+    — no DB hit, no provider call."""
+    return SkillsListOut(
+        default_skill_id=DEFAULT_SKILL_ID,
+        skill_version=SKILL_VERSION,
+        skills=[
+            SkillOut(id=s.id, label=s.label, purpose=s.purpose)
+            for s in SKILLS.values()
+        ],
+    )
+
+
 @router.post("/preview", response_model=PreviewOut)
 async def preview(req: PreviewIn) -> PreviewOut:
-    packet, git = await _build_packet_from_request(req, secret_override=False)
+    packet, git, skill_id = await _build_packet_from_request(
+        req, secret_override=False
+    )
     return PreviewOut(
         byte_count=packet.byte_count,
         estimated_tokens=packet.estimated_tokens,
@@ -277,6 +330,8 @@ async def preview(req: PreviewIn) -> PreviewOut:
             for h in packet.secret_hits
         ],
         prompt_preview=packet.prompt[:1024],
+        skill_id=skill_id,
+        skill_version=SKILL_VERSION,
     )
 
 
@@ -293,7 +348,7 @@ async def send(req: SendIn) -> MessageOut:
             400, f"thread provider {provider_name!r} is not registered"
         )
 
-    packet, _git = await _build_packet_from_request(
+    packet, _git, skill_id = await _build_packet_from_request(
         req, secret_override=req.secret_override
     )
 
@@ -325,7 +380,11 @@ async def send(req: SendIn) -> MessageOut:
         source_turn_uuid=req.claude_turn_uuid,
         context_used_json=json.dumps(
             {
-                "reviewer_mode": req.reviewer_mode,
+                "skill_id": skill_id,
+                "skill_version": SKILL_VERSION,
+                # Legacy alias kept for back-compat with consumers that
+                # still read context_used_json.reviewer_mode.
+                "reviewer_mode": skill_id,
                 "evidence_toggles": req.evidence.model_dump(),
             }
         ),
@@ -334,10 +393,30 @@ async def send(req: SendIn) -> MessageOut:
         estimated_tokens=packet.estimated_tokens,
     )
 
-    # Try resume first if we have a session id; on failure, drop it and
-    # cold-start. We DO NOT replay old messages — the provider sees only
-    # this packet.
-    session_id_in = thread["provider_session_id"]
+    # Skill-versioned session reset: if the stored Codex session was
+    # created against a different skill or a different SKILL_VERSION,
+    # discard it and force a fresh session. This stops "old report
+    # style" contamination from Codex's resume memory bleeding into a
+    # new skill's strict format.
+    stored_skill_id = thread.get("provider_session_skill_id")
+    stored_skill_version = thread.get("provider_session_skill_version")
+    skill_changed = (
+        stored_skill_id != skill_id or stored_skill_version != SKILL_VERSION
+    )
+    session_id_in: str | None = thread["provider_session_id"]
+    if skill_changed and session_id_in is not None:
+        _log.info(
+            "thread %d skill changed (%r v%s -> %r v%s); discarding "
+            "stored Codex session %s and starting fresh.",
+            req.thread_id,
+            stored_skill_id,
+            stored_skill_version,
+            skill_id,
+            SKILL_VERSION,
+            session_id_in,
+        )
+        session_id_in = None
+
     result = None
     resume_attempted = bool(session_id_in)
     resume_succeeded = False
@@ -365,8 +444,8 @@ async def send(req: SendIn) -> MessageOut:
     # TODO: Promote `resume_attempted` / `resume_succeeded` to dedicated
     # columns on review_messages so dashboards / audits can answer "how
     # often does Codex resume actually work?" without having to JSON-decode
-    # every context_used_json blob. For now they live inside the JSON; this
-    # comment marks the upgrade path for a future migration v5.
+    # every context_used_json blob. For now they live inside the JSON; a
+    # future migration could surface them as columns.
     reviewer_msg = db.add_review_message(
         thread_id=req.thread_id,
         role="reviewer",
@@ -375,9 +454,13 @@ async def send(req: SendIn) -> MessageOut:
         source_turn_uuid=req.claude_turn_uuid,
         context_used_json=json.dumps(
             {
-                "reviewer_mode": req.reviewer_mode,
+                "skill_id": skill_id,
+                "skill_version": SKILL_VERSION,
+                # Legacy alias for old consumers.
+                "reviewer_mode": skill_id,
                 "resume_attempted": resume_attempted,
                 "resume_succeeded": resume_succeeded,
+                "skill_session_reset": skill_changed,
             }
         ),
         evidence_used_json=None,
@@ -385,9 +468,14 @@ async def send(req: SendIn) -> MessageOut:
         model=result.model,
         provider_tokens=result.tokens_used,
     )
-    # Replace provider_session_id with whatever the provider returned this
-    # time (usually unchanged on resume; new id when we cold-started).
+    # Replace provider_session_id and snapshot the (skill_id, version)
+    # under which the new session was created. The next /send checks
+    # those and resets again if the user has switched skills.
     db.update_review_thread(
-        req.thread_id, provider_session_id=result.session_id_out
+        req.thread_id,
+        provider_session_id=result.session_id_out,
+        active_skill_id=skill_id,
+        provider_session_skill_id=skill_id,
+        provider_session_skill_version=SKILL_VERSION,
     )
     return _row_to_message(reviewer_msg)

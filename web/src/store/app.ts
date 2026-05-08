@@ -5,7 +5,7 @@ import type {
   PromptWriterContextMode,
   PromptWriterMode,
   ReviewEvidenceFlags,
-  ReviewerMode,
+  SkillId,
   ScratchpadItem,
   SessionFull,
   TranscriptEvent,
@@ -122,7 +122,7 @@ interface AppState {
     sourceTurnUuid: string | null;
     sourceTurnRole: string | null;
     sourceTurnText: string | null;
-    reviewerMode: ReviewerMode;
+    skillId: SkillId;
     question: string;
     testOutput: string;
     buildOutput: string;
@@ -302,7 +302,7 @@ export const useApp = create<AppState>((set) => ({
     sourceTurnUuid: null,
     sourceTurnRole: null,
     sourceTurnText: null,
-    reviewerMode: "critical",
+    skillId: "quick_review",
     question: "",
     testOutput: "",
     buildOutput: "",

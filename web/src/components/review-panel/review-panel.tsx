@@ -33,8 +33,9 @@ import {
   type ReviewMessage,
   type ReviewPreview,
   type ReviewSecretHit,
+  type ReviewSkill,
   type ReviewThread,
-  type ReviewerMode,
+  type SkillId,
 } from "@/lib/api";
 import { cn, formatRelative } from "@/lib/utils";
 import { sessionDisplayName } from "@/lib/session-display";
@@ -48,16 +49,24 @@ import {
 import { effectiveQuestion } from "./effective-question";
 import { toast } from "sonner";
 
-const REVIEWER_MODES: { id: ReviewerMode; label: string; hint: string }[] = [
+/** Fallback skill list when ``/api/reviews/skills`` hasn't replied yet (or
+ *  the call failed). The runtime list is fetched on panel-open and cached
+ *  in component state; the UI swaps over once it arrives. */
+const FALLBACK_SKILLS: ReviewSkill[] = [
   {
-    id: "critical",
-    label: "Critical Reviewer",
-    hint: "Risks, missing tests, scope creep, next prompt",
+    id: "quick_review",
+    label: "Quick Review",
+    purpose: "Fast daily review of the current Claude result.",
+  },
+  {
+    id: "critical_review",
+    label: "Critical Review",
+    purpose: "Find risks, weak assumptions, missing tests, scope creep.",
   },
   {
     id: "prompt_coach",
     label: "Prompt Coach",
-    hint: "Clarify intent and write a stronger prompt",
+    purpose: "Help write the best next prompt for Claude Code.",
   },
 ];
 
@@ -134,6 +143,21 @@ export function ReviewPanel() {
   // The user toggles ``showHistory`` to reveal them.
   const [openedAt, setOpenedAt] = React.useState<number>(() => Date.now());
   const [showHistory, setShowHistory] = React.useState(false);
+  // Skill registry, fetched from /api/reviews/skills on first open. The
+  // FALLBACK list keeps the pills usable even if the request hasn't
+  // resolved yet (or fails) — the runtime list overrides it.
+  const [skills, setSkills] = React.useState<ReviewSkill[]>(FALLBACK_SKILLS);
+  const skillsFetchedRef = React.useRef(false);
+  React.useEffect(() => {
+    if (!open || skillsFetchedRef.current) return;
+    skillsFetchedRef.current = true;
+    api
+      .reviewsListSkills()
+      .then((r) => setSkills(r.skills))
+      .catch(() => {
+        // Stay on the fallback list — better than rendering an empty pill row.
+      });
+  }, [open]);
 
   const activeThread = threads.find((t) => t.id === panel.threadId) ?? null;
 
@@ -156,8 +180,8 @@ export function ReviewPanel() {
     for (let i = visibleMessages.length - 1; i >= 0; i--) {
       const m = visibleMessages[i];
       if (m.role !== "reviewer") continue;
-      const mode = reviewerModeFromMessage(m);
-      if (mode === "critical") {
+      const skill = reviewerModeFromMessage(m);
+      if (renderModeForSkill(skill) === "critical_or_quick") {
         const p = parseCriticalReview(m.content);
         if (p.parsed && p.nextPrompt) return { msg: m, prompt: p.nextPrompt };
       } else {
@@ -269,7 +293,7 @@ export function ReviewPanel() {
   const previewRequest = React.useMemo(
     () => ({
       question: effectiveQuestion(panel.question),
-      reviewer_mode: panel.reviewerMode,
+      skill_id: panel.skillId,
       project_bucket: projectBucket,
       project_cwd: projectCwd,
       claude_session_id: claudeSessionId,
@@ -282,7 +306,7 @@ export function ReviewPanel() {
     }),
     [
       panel.question,
-      panel.reviewerMode,
+      panel.skillId,
       panel.sourceTurnUuid,
       panel.sourceTurnRole,
       panel.sourceTurnText,
@@ -481,8 +505,9 @@ export function ReviewPanel() {
           />
 
           <OptionsRow
-            mode={panel.reviewerMode}
-            onChangeMode={(m) => setField("reviewerMode", m)}
+            skillId={panel.skillId}
+            skills={skills}
+            onChangeSkill={(id) => setField("skillId", id)}
             autoReview={autoReview}
             onChangeAutoReview={setAutoReview}
           />
@@ -762,33 +787,38 @@ function SubjectCard({
  *  codex provider badge already lives in the header, so we keep this row
  *  short and inline rather than a full mode-card grid. */
 function OptionsRow({
-  mode,
-  onChangeMode,
+  skillId,
+  skills,
+  onChangeSkill,
   autoReview,
   onChangeAutoReview,
 }: {
-  mode: ReviewerMode;
-  onChangeMode: (m: ReviewerMode) => void;
+  skillId: SkillId;
+  skills: ReviewSkill[];
+  onChangeSkill: (s: SkillId) => void;
   autoReview: boolean;
   onChangeAutoReview: (v: boolean) => void;
 }) {
   return (
     <div className="flex flex-wrap items-center gap-2 border-b border-border px-4 py-2">
-      <div className="flex items-center gap-1.5">
-        {REVIEWER_MODES.map((m) => (
+      <span className="text-[10.5px] font-medium uppercase tracking-wider text-muted-foreground">
+        Review skill
+      </span>
+      <div className="flex flex-wrap items-center gap-1.5">
+        {skills.map((s) => (
           <button
-            key={m.id}
+            key={s.id}
             type="button"
-            onClick={() => onChangeMode(m.id)}
-            title={m.hint}
+            onClick={() => onChangeSkill(s.id)}
+            title={s.purpose}
             className={cn(
               "rounded-md border px-2 py-1 text-[11.5px] transition-colors",
-              mode === m.id
+              skillId === s.id
                 ? "border-primary bg-primary/10 text-foreground"
                 : "border-border text-muted-foreground hover:bg-accent/40",
             )}
           >
-            {m.label}
+            {s.label}
           </button>
         ))}
       </div>
@@ -1173,12 +1203,39 @@ function UserMessageView({ msg }: { msg: ReviewMessage }) {
   );
 }
 
-/** Pull the reviewer mode that was used when sending this message, falling
- *  back to "critical" since that's the V1 default. */
-function reviewerModeFromMessage(m: ReviewMessage): ReviewerMode {
-  const v = (m.context_used_json as { reviewer_mode?: string } | null)
-    ?.reviewer_mode;
-  return v === "prompt_coach" ? "prompt_coach" : "critical";
+/** Pull the skill id that was used when this message was sent. Reads the
+ *  new ``skill_id`` field first, then the legacy ``reviewer_mode`` for
+ *  back-compat with messages from before the skill system, then falls
+ *  back to ``critical_review`` (the default for ambiguous legacy data).
+ *  Returns the skill_id; the caller maps it to a render mode. */
+function reviewerModeFromMessage(m: ReviewMessage): SkillId {
+  const ctx = m.context_used_json as
+    | { skill_id?: string; reviewer_mode?: string }
+    | null;
+  const skill = ctx?.skill_id;
+  if (
+    skill === "quick_review" ||
+    skill === "critical_review" ||
+    skill === "prompt_coach"
+  ) {
+    return skill;
+  }
+  const legacy = ctx?.reviewer_mode;
+  if (legacy === "quick_review") return "quick_review";
+  if (legacy === "prompt_coach") return "prompt_coach";
+  if (legacy === "critical_review" || legacy === "critical") {
+    return "critical_review";
+  }
+  return "critical_review";
+}
+
+/** Resolve the render mode for a message — Critical and Quick Review
+ *  share the same compact verdict/why/next/prompt view; Prompt Coach has
+ *  its own. */
+function renderModeForSkill(
+  skill: SkillId,
+): "critical_or_quick" | "prompt_coach" {
+  return skill === "prompt_coach" ? "prompt_coach" : "critical_or_quick";
 }
 
 function ReviewerMessageView({
@@ -1190,20 +1247,29 @@ function ReviewerMessageView({
   onCopyPrompt: (prompt: string) => void;
   hidePromptBox?: boolean;
 }) {
-  const mode = reviewerModeFromMessage(msg);
+  const skill = reviewerModeFromMessage(msg);
+  const renderMode = renderModeForSkill(skill);
   const parsed = React.useMemo(
     () =>
-      mode === "critical"
+      renderMode === "critical_or_quick"
         ? parseCriticalReview(msg.content)
         : parseCoachReview(msg.content),
-    [msg.content, mode],
+    [msg.content, renderMode],
   );
+
+  // Short label shown in the message header — Quick / Critical / Coach.
+  const skillLabel =
+    skill === "quick_review"
+      ? "quick"
+      : skill === "prompt_coach"
+      ? "coach"
+      : "critical";
 
   return (
     <article className="rounded-lg border border-primary/30 bg-primary/5 p-4">
       <header className="mb-3 flex items-center gap-2 text-[10.5px] uppercase tracking-wider text-muted-foreground">
         <ShieldCheck className="h-3 w-3 text-primary" />
-        <span>reviewer · {mode === "critical" ? "critical" : "coach"}</span>
+        <span>reviewer · {skillLabel}</span>
         {msg.model && (
           <span className="font-mono text-[10px]">{msg.model}</span>
         )}
@@ -1215,14 +1281,14 @@ function ReviewerMessageView({
         )}
       </header>
 
-      {parsed.parsed && mode === "critical" ? (
+      {parsed.parsed && renderMode === "critical_or_quick" ? (
         <CriticalReviewView
           parsed={parsed as CriticalReview}
           fullContent={msg.content}
           onCopyPrompt={onCopyPrompt}
           hidePromptBox={hidePromptBox}
         />
-      ) : parsed.parsed && mode === "prompt_coach" ? (
+      ) : parsed.parsed && renderMode === "prompt_coach" ? (
         <CoachReviewView
           parsed={parsed as CoachReview}
           fullContent={msg.content}

@@ -18,7 +18,7 @@ from server.review_packet import (
 def _make_inputs(**overrides) -> PacketInputs:
     base = dict(
         question="Did this change introduce a regression in the parser?",
-        reviewer_mode="critical",
+        skill_id="critical_review",
         project_cwd="/repo/example",
         claude_session_id="sess-123",
         claude_turn_uuid="turn-abc",
@@ -55,7 +55,7 @@ def _clean_git() -> GitCapture:
 
 def test_build_critical_packet_includes_all_evidence():
     pkt = build_packet(_make_inputs(), _clean_git())
-    assert "CRITICAL REVIEWER" in pkt.prompt
+    assert "CRITICAL REVIEW" in pkt.prompt
     assert "PROJECT: /repo/example" in pkt.prompt
     assert "CLAUDE SESSION: sess-123" in pkt.prompt
     assert "## SELECTED CLAUDE RESULT" in pkt.prompt
@@ -68,52 +68,58 @@ def test_build_critical_packet_includes_all_evidence():
     assert pkt.secret_hits == ()
 
 
-def test_build_prompt_coach_mode_uses_coach_instructions():
-    pkt = build_packet(_make_inputs(reviewer_mode="prompt_coach"), _clean_git())
+def test_build_quick_review_uses_quick_instructions():
+    pkt = build_packet(_make_inputs(skill_id="quick_review"), _clean_git())
+    assert "QUICK REVIEW" in pkt.prompt
+    assert pkt.audit_snapshot["skill_id"] == "quick_review"
+    # Quick Review enforces the canonical chat headings.
+    for label in ("VERDICT:", "WHY:", "NEXT ACTION:", "PROMPT TO SEND CLAUDE:"):
+        assert label in pkt.prompt
+
+
+def test_build_prompt_coach_uses_coach_instructions():
+    pkt = build_packet(_make_inputs(skill_id="prompt_coach"), _clean_git())
     assert "PROMPT COACH" in pkt.prompt
+    assert pkt.audit_snapshot["skill_id"] == "prompt_coach"
+    # Legacy alias kept for older consumers reading audit blobs.
     assert pkt.audit_snapshot["reviewer_mode"] == "prompt_coach"
 
 
-def test_critical_prompt_requests_structured_section_labels():
-    """The frontend parser keys off these literal labels; if a future edit
-    drops or renames them the panel silently falls back to the raw view.
-    Lock the contract here."""
-    pkt = build_packet(_make_inputs(reviewer_mode="critical"), _clean_git())
+def test_critical_skill_requests_canonical_chat_labels():
+    """Lock the contract so a future skill edit doesn't drop a label the
+    frontend parser depends on."""
+    pkt = build_packet(_make_inputs(skill_id="critical_review"), _clean_git())
     for label in (
         "VERDICT:",
-        "WHAT MATTERS:",
+        "WHY:",
         "NEXT ACTION:",
         "PROMPT TO SEND CLAUDE:",
     ):
         assert label in pkt.prompt, f"missing {label!r} in critical prompt"
-    # OPTIONAL NOTES is conditional — instructions must mention it without
-    # REQUIRING it on every reply.
+    # OPTIONAL NOTES is conditional — instructions mention it but don't
+    # require it on every reply.
     assert "OPTIONAL NOTES" in pkt.prompt
-    # The instructions should ask for a one-sentence verdict and tell the
-    # model to keep replies short / focused / actionable.
-    assert "ONE short sentence" in pkt.prompt
-    # Markdown-friendly prompts: the model is told to preserve structure.
-    assert "Markdown" in pkt.prompt
-    # Anti-meta-discussion guard: lock the rule that the reviewer should
-    # not ramble about parser/UI/tests unless that's the subject.
-    assert "parser implementation" in pkt.prompt
-    assert "actual subject" in pkt.prompt
+    # Anti-legacy guard: instructions explicitly forbid old audit
+    # headings so the reviewer can't fall back into report mode.
+    assert "NEXT PROMPT FOR CLAUDE CODE" in pkt.prompt  # listed as forbidden
+    assert "Missing tests" in pkt.prompt or "MISSING TESTS" in pkt.prompt.upper()
 
 
-def test_coach_prompt_requests_structured_section_labels():
-    pkt = build_packet(_make_inputs(reviewer_mode="prompt_coach"), _clean_git())
-    for label in (
-        "CLARIFIED INTENT:",
-        "IMPROVED PROMPT:",
-        "WHY THIS IS BETTER:",
-        "DETAILS:",
-    ):
-        assert label in pkt.prompt, f"missing {label!r} in coach prompt"
+def test_coach_skill_uses_unified_prompt_label():
+    """All skills now use 'PROMPT TO SEND CLAUDE' — the legacy 'IMPROVED
+    PROMPT' label is forbidden in the coach instructions."""
+    pkt = build_packet(_make_inputs(skill_id="prompt_coach"), _clean_git())
+    assert "CLARIFIED INTENT:" in pkt.prompt
+    assert "PROMPT TO SEND CLAUDE:" in pkt.prompt
+    assert "WHY THIS WORKS:" in pkt.prompt
+    # Forbidden legacy headings appear in the rules section as
+    # do-not-use guidance, but the FORMAT block must not use them.
+    # We just assert the canonical labels are present.
 
 
-def test_unknown_reviewer_mode_raises():
-    with pytest.raises(ValueError, match="reviewer_mode"):
-        build_packet(_make_inputs(reviewer_mode="banana"), _clean_git())
+def test_unknown_skill_id_raises():
+    with pytest.raises(ValueError, match="skill_id"):
+        build_packet(_make_inputs(skill_id="banana"), _clean_git())
 
 
 def test_evidence_toggles_off_excludes_sections():
@@ -194,7 +200,9 @@ def test_audit_snapshot_records_byte_count_and_estimated_tokens():
     pkt = build_packet(_make_inputs(), _clean_git())
     assert pkt.audit_snapshot["byte_count"] == pkt.byte_count
     assert pkt.audit_snapshot["estimated_tokens"] == pkt.estimated_tokens
-    assert pkt.audit_snapshot["reviewer_mode"] == "critical"
+    assert pkt.audit_snapshot["skill_id"] == "critical_review"
+    # Legacy alias kept on the audit blob.
+    assert pkt.audit_snapshot["reviewer_mode"] == "critical_review"
     assert pkt.audit_snapshot["secret_override_used"] is False
 
 

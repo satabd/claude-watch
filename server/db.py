@@ -208,6 +208,21 @@ def _migration_v4(conn: sqlite3.Connection) -> None:
         conn.execute(stmt)
 
 
+# v5 — Review Skills versioning. Adds three columns to review_threads so
+# we can track WHICH skill is active and which (skill_id, skill_version)
+# pair the stored Codex provider session was created against. The send
+# route refuses to resume a session whose stored pair doesn't match the
+# current selection, guaranteeing a clean break when skill instructions
+# change meaningfully.
+def _migration_v5(conn: sqlite3.Connection) -> None:
+    for stmt in (
+        "ALTER TABLE review_threads ADD COLUMN active_skill_id TEXT",
+        "ALTER TABLE review_threads ADD COLUMN provider_session_skill_id TEXT",
+        "ALTER TABLE review_threads ADD COLUMN provider_session_skill_version INTEGER",
+    ):
+        _safe_alter(conn, stmt)
+
+
 # Ordered list of (version, sql_or_callable, description). The last entry's
 # version number IS the current schema version.
 MIGRATIONS: list[tuple[int, Callable[[sqlite3.Connection], None], str]] = [
@@ -219,6 +234,12 @@ MIGRATIONS: list[tuple[int, Callable[[sqlite3.Connection], None], str]] = [
         "remote_hosts: add status, last_poll_ms, last_event_ms, next_retry_ms",
     ),
     (4, _migration_v4, "review_threads + review_messages"),
+    (
+        5,
+        _migration_v5,
+        "review_threads: add active_skill_id, provider_session_skill_id, "
+        "provider_session_skill_version",
+    ),
 ]
 
 
@@ -763,10 +784,19 @@ def update_review_thread(
     *,
     name: str | None = None,
     provider_session_id: str | None | _Sentinel = _UNSET,
+    active_skill_id: str | None | _Sentinel = _UNSET,
+    provider_session_skill_id: str | None | _Sentinel = _UNSET,
+    provider_session_skill_version: int | None | _Sentinel = _UNSET,
     archived: bool | None = None,
 ) -> dict[str, Any] | None:
-    """Patch a thread. Omit ``provider_session_id`` to leave it alone; pass
-    ``None`` explicitly to clear it; pass a string to replace it."""
+    """Patch a thread. ``_UNSET`` (the default for sentinel-typed fields)
+    means "leave column alone". Pass ``None`` explicitly to clear a
+    column; pass a value to replace it.
+
+    Skill-related fields exist for the Review Skills versioning scheme:
+    the send route stores the (skill_id, version) pair under which the
+    Codex session was created, then refuses to resume the session if the
+    user later selects a different skill or the version is bumped."""
     fields: list[str] = []
     params: list[Any] = []
     if name is not None:
@@ -775,6 +805,15 @@ def update_review_thread(
     if provider_session_id is not _UNSET:
         fields.append("provider_session_id = ?")
         params.append(provider_session_id)
+    if active_skill_id is not _UNSET:
+        fields.append("active_skill_id = ?")
+        params.append(active_skill_id)
+    if provider_session_skill_id is not _UNSET:
+        fields.append("provider_session_skill_id = ?")
+        params.append(provider_session_skill_id)
+    if provider_session_skill_version is not _UNSET:
+        fields.append("provider_session_skill_version = ?")
+        params.append(provider_session_skill_version)
     if archived is True:
         fields.append("archived_at = ?")
         params.append(int(time.time() * 1000))

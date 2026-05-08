@@ -74,18 +74,33 @@ type KnownHeading = (typeof KNOWN_HEADINGS)[number];
 /** Strip the cosmetic noise a model might wrap a heading line with
  *  (markdown heading, numeric prefix, bold markers, trailing colon /
  *  dash / period) and uppercase the rest, so a single equality check
- *  matches every plausible variant — ``**VERDICT:**``, ``## Verdict``,
- *  ``1. VERDICT —``, ``Verdict:`` all collapse to ``VERDICT``. */
+ *  matches every plausible variant.
+ *
+ *  Examples that all normalize to ``NEXT PROMPT FOR CLAUDE CODE``:
+ *    * ``NEXT PROMPT FOR CLAUDE CODE:``
+ *    * ``## NEXT PROMPT FOR CLAUDE CODE``
+ *    * ``6. NEXT PROMPT FOR CLAUDE CODE:``
+ *    * ``**6. NEXT PROMPT FOR CLAUDE CODE:**``
+ *    * ``### **NEXT PROMPT FOR CLAUDE CODE**``
+ *
+ *  We loop the strip patterns until the line is stable so noise can
+ *  appear in any order — bold-around-numbered, hash-around-bold, etc.
+ *  Without the loop, ``**6. …:**`` would only strip the outer bold and
+ *  leave the numeric prefix in place. */
 function normalizeHeadingLine(line: string): string {
-  return line
-    .trim()
-    .replace(/^#{1,4}\s+/, "")
-    .replace(/^\d+[.)]\s*/, "")
-    .replace(/^\*\*\s*/, "")
-    .replace(/\s*\*\*$/, "")
-    .replace(/[:.\-—]+$/, "")
-    .trim()
-    .toUpperCase();
+  let s = line.trim();
+  for (let i = 0; i < 5; i++) {
+    const before = s;
+    s = s
+      .replace(/^#{1,4}\s+/, "")
+      .replace(/^\d+[.)]\s*/, "")
+      .replace(/^\*\*\s*/, "")
+      .replace(/\s*\*\*$/, "")
+      .replace(/[:.\-—]+$/, "")
+      .trim();
+    if (s === before) break;
+  }
+  return s.toUpperCase();
 }
 
 const KNOWN_SET: ReadonlySet<string> = new Set(KNOWN_HEADINGS);

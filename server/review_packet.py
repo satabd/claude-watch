@@ -13,6 +13,11 @@ Secret detection scans the prompt-bound text and flags obvious leaks
 (API keys, private key headers, etc.) BEFORE the prompt leaves the host.
 The user can override on a per-send basis; we do not persist a global
 "always allow secrets" preference.
+
+Reviewer behavior comes from a *skill* (see :mod:`server.review_skills`):
+each skill is a typed instruction body with a frozen output format. The
+packet builder injects the skill's instruction at the top, then the
+evidence sections, then the user's question.
 """
 from __future__ import annotations
 
@@ -21,6 +26,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from .git_capture import GitCapture
+from .review_skills import SKILLS, get_skill
 
 # ---------------------------------------------------------------------------
 # Caps. Outbound (sent to reviewer) caps are larger than audit (stored
@@ -44,84 +50,16 @@ MAX_QUESTION_AUDIT_BYTES = 2_000
 MAX_DIRTY_FILES_AUDITED = 200
 
 
-# Reviewer modes — keep in sync with REVIEWER_MODE_INSTRUCTIONS below.
+# Reviewer modes — kept as a back-compat alias for code that still talks
+# about "critical" / "prompt_coach". New code should use review_skills.
 REVIEWER_MODES: tuple[str, ...] = ("critical", "prompt_coach")
 
-REVIEWER_MODE_INSTRUCTIONS: dict[str, str] = {
-    # Both prompts request a strict, parseable section structure. The frontend
-    # parser keys off the literal labels (VERDICT:, KEY FINDINGS:, etc.) to
-    # render a compact action-oriented summary; the optional DETAILS section
-    # is shown only when the user expands "Show full review". If the model
-    # deviates from the structure the frontend silently falls back to the
-    # raw view, so a strict format is a UX improvement, not a correctness
-    # requirement.
-    "critical": (
-        "You are a CRITICAL REVIEWER pair-programming with a developer who"
-        " is using Claude Code. Focus on the SELECTED CLAUDE RESULT and the"
-        " user's current guidance. Be concise, conversational, and useful.\n"
-        "\n"
-        "Rules:\n"
-        "- Do NOT produce a long formal audit report unless the user asks.\n"
-        "- Always produce a practical PROMPT TO SEND CLAUDE.\n"
-        "- If the next step is obvious, write the prompt directly.\n"
-        "- Do not lecture about parser implementation, UI implementation,"
-        " or tests UNLESS that is the actual subject of the Claude"
-        " result.\n"
-        "\n"
-        "Reply EXACTLY in this format with these section labels (uppercase,"
-        " followed by a colon, on their own line). Do not add other"
-        " top-level sections by default:\n"
-        "\n"
-        "VERDICT:\n"
-        "[ONE short sentence — your overall take]\n"
-        "\n"
-        "WHAT MATTERS:\n"
-        "- [short point]\n"
-        "- [short point]\n"
-        "- [short point — at most 3 bullets]\n"
-        "\n"
-        "NEXT ACTION:\n"
-        "[ONE clear actionable instruction the user should do next]\n"
-        "\n"
-        "PROMPT TO SEND CLAUDE:\n"
-        "[a clean, copy-ready prompt the user can paste back to Claude"
-        " Code. Format it as Markdown when structure helps — preserve"
-        " numbered steps, bulleted lists, and fenced code blocks for code"
-        " or commands. No preamble, no surrounding fences around the WHOLE"
-        " prompt, no meta commentary — just the prompt.]\n"
-        "\n"
-        "OPTIONAL NOTES:\n"
-        "[ONLY if there is something the user genuinely needs to know that"
-        " doesn't fit above. Otherwise omit this section entirely. Keep it"
-        " short.]"
-    ),
-    "prompt_coach": (
-        "You are a PROMPT COACH helping the user write a stronger prompt for"
-        " Claude Code based on the current evidence. Be terse and specific.\n"
-        "\n"
-        "Reply EXACTLY in this format with these section labels (uppercase,"
-        " followed by a colon, on their own line). Do not add other"
-        " top-level sections:\n"
-        "\n"
-        "CLARIFIED INTENT:\n"
-        "[1-2 sentences explaining what the user actually wants Claude Code"
-        " to do]\n"
-        "\n"
-        "IMPROVED PROMPT:\n"
-        "[the full copy-ready prompt. No preamble, no quotes, no fenced"
-        " code block — just the prompt text. Aim for clear scope, success"
-        " criteria, and any constraints inferred from the evidence.]\n"
-        "\n"
-        "WHY THIS IS BETTER:\n"
-        "- [short reason 1]\n"
-        "- [short reason 2]\n"
-        "- [short reason 3 — at most 3 bullets]\n"
-        "\n"
-        "DETAILS:\n"
-        "[optional: longer explanation of context-inclusion choices and"
-        " trade-offs. May be omitted entirely.]"
-    ),
-}
+# NOTE: legacy ``REVIEWER_MODE_INSTRUCTIONS`` was removed in favour of the
+# Skill registry in ``server.review_skills``. The frontend parser still
+# accepts the legacy heading set (KEY FINDINGS, RECOMMENDED NEXT STEP,
+# NEXT PROMPT FOR CLAUDE CODE, …) so historical messages render
+# correctly. Each new Skill explicitly forbids those legacy headings in
+# its instruction body.
 
 
 # Secret patterns. Each is (label, compiled_regex). Order is loose to
@@ -177,7 +115,7 @@ class PacketInputs:
     """Everything the builder needs apart from the GitCapture."""
 
     question: str
-    reviewer_mode: str  # one of REVIEWER_MODES
+    skill_id: str  # one of review_skills.SKILLS
     project_cwd: str | None = None
     claude_session_id: str | None = None
     claude_turn_uuid: str | None = None
@@ -264,17 +202,18 @@ def build_packet(
     they're returned — it only flips the ``secret_override_used`` field in
     the audit snapshot so we can record that the user knowingly proceeded.
     """
-    if inputs.reviewer_mode not in REVIEWER_MODES:
+    if inputs.skill_id not in SKILLS:
         raise ValueError(
-            f"unknown reviewer_mode: {inputs.reviewer_mode!r}; "
-            f"expected one of {REVIEWER_MODES}"
+            f"unknown skill_id: {inputs.skill_id!r}; "
+            f"expected one of {tuple(SKILLS)}"
         )
+    skill = get_skill(inputs.skill_id)
 
     parts: list[str] = []
     audit: dict[str, Any] = {}
     secret_hits: list[SecretHit] = []
 
-    parts.append(REVIEWER_MODE_INSTRUCTIONS[inputs.reviewer_mode])
+    parts.append(skill.instruction)
     parts.append("\n--- EVIDENCE ---")
 
     # Project meta — small, never truncated.
@@ -432,7 +371,10 @@ def build_packet(
     byte_count = len(prompt.encode("utf-8"))
     audit["byte_count"] = byte_count
     audit["estimated_tokens"] = estimate_tokens(byte_count)
-    audit["reviewer_mode"] = inputs.reviewer_mode
+    audit["skill_id"] = inputs.skill_id
+    # Legacy alias kept so historical messages don't blank out the audit
+    # field. New consumers should read ``skill_id``.
+    audit["reviewer_mode"] = inputs.skill_id
     audit["secret_override_used"] = bool(secret_override and secret_hits)
 
     return BuiltPacket(
