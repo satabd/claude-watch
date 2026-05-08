@@ -4,11 +4,11 @@
  *  in the React + zustand surface of review-panel.tsx.
  */
 
-/** Used when the user clicks Send without typing a question. Keeping this
- *  one literal in one place means the size preview, the actual /send call,
- *  and any future test all agree on what gets sent. */
+/** Used when the user clicks Send with Auto Review checked and an empty
+ *  composer. Keeping this one literal in one place means the size preview,
+ *  the actual /send call, and any future test all agree on what gets sent. */
 export const DEFAULT_QUESTION =
-  "Please review the selected Claude result, current evidence, risks, missing tests, and suggest the next best prompt for Claude Code.";
+  "Review this Claude Code result. Focus on correctness, risks, missing tests, scope creep, and the best next prompt to send to Claude Code.";
 
 /** Frontend never calls /api/reviews/{preview,send} with an empty question
  *  — the backend's pydantic validator requires min_length=1 and would

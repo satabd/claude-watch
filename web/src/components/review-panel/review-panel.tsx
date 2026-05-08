@@ -1,22 +1,19 @@
 import * as React from "react";
 import {
   AlertCircle,
-  AlertTriangle,
-  CheckCircle2,
   Check,
   ChevronDown,
   ChevronRight,
   ClipboardCheck,
   Copy,
-  Eye,
   History,
   Loader2,
   MessageSquare,
-  OctagonAlert,
   Plus,
   Send,
   ShieldAlert,
   ShieldCheck,
+  Sparkles,
 } from "lucide-react";
 import { Sheet, SheetContent } from "@/components/ui/sheet";
 import { Button } from "@/components/ui/button";
@@ -42,10 +39,8 @@ import { copyTargetForReply } from "@/lib/extract-next-prompt";
 import {
   parseCoachReview,
   parseCriticalReview,
-  VERDICT_DISPLAY,
   type CoachReview,
   type CriticalReview,
-  type Verdict,
 } from "@/lib/review-parser";
 import { effectiveQuestion } from "./effective-question";
 import { toast } from "sonner";
@@ -122,8 +117,22 @@ export function ReviewPanel() {
   const [secretOverride, setSecretOverride] = React.useState(false);
   const [setupState, setSetupState] = React.useState<SetupState>("idle");
   const [setupError, setSetupError] = React.useState<string | null>(null);
+  // Auto Review: when checked, an empty composer + Send is allowed and
+  // sends the DEFAULT_QUESTION. When unchecked, Send is disabled until the
+  // user types guidance — the spec wants this to be an explicit opt-in for
+  // "just review it for me, no guidance needed".
+  const [autoReview, setAutoReview] = React.useState(false);
+  // Subject card (Claude result preview at the top) and the Evidence
+  // section default to collapsed — chat composer is the visual focus.
+  const [subjectExpanded, setSubjectExpanded] = React.useState(false);
 
   const activeThread = threads.find((t) => t.id === panel.threadId) ?? null;
+  const composerHasText = panel.question.trim().length > 0;
+  // Send is enabled iff there's text OR Auto Review is on (an explicit
+  // opt-in to send a default review). The thread must also exist; setup
+  // banner handles the "still preparing" case so it's safe to gate on
+  // activeThread here.
+  const canSend = !!activeThread && !sending && (composerHasText || autoReview);
 
   /** Find the most recent active thread for (bucket, claude_session_id) and
    *  select it; otherwise auto-create one. Runs once per panel open. Calls
@@ -377,12 +386,20 @@ export function ReviewPanel() {
         <header className="flex shrink-0 items-center gap-2 border-b border-border px-4 py-3">
           <ClipboardCheck className="h-4 w-4 text-primary" />
           <div className="flex-1 min-w-0">
-            <div className="text-sm font-semibold">Review current work</div>
+            <div className="text-sm font-semibold">Review current Claude work</div>
             <div className="truncate text-[11px] text-muted-foreground">
               {projectCwd ?? "No project selected"}
+              {sessionMeta && (
+                <>
+                  <span className="mx-1.5">·</span>
+                  <span className="font-mono">
+                    {sessionDisplayName(sessionMeta, 32)}
+                  </span>
+                </>
+              )}
               {panel.sourceTurnUuid && (
                 <span className="ms-2 rounded bg-muted px-1 font-mono">
-                  anchored to turn {panel.sourceTurnUuid.slice(0, 8)}
+                  turn {panel.sourceTurnUuid.slice(0, 8)}
                 </span>
               )}
             </div>
@@ -405,12 +422,23 @@ export function ReviewPanel() {
           }
         />
 
-        {/* Single-focus body: full panel width, no permanent sidebar.
-            History lives in the header popover above. */}
+        {/* Chat-style scroll region: subject card + options + evidence
+            collapse + the message thread, all in one column. The composer
+            is pinned below this so the textbox stays put while messages
+            grow upward. */}
         <div className="flex min-w-0 flex-1 flex-col overflow-y-auto scrollbar-thin">
-          <ReviewerModeRow
+          <SubjectCard
+            text={panel.sourceTurnText}
+            role={panel.sourceTurnRole}
+            expanded={subjectExpanded}
+            onToggle={() => setSubjectExpanded((v) => !v)}
+          />
+
+          <OptionsRow
             mode={panel.reviewerMode}
-            onChange={(m) => setField("reviewerMode", m)}
+            onChangeMode={(m) => setField("reviewerMode", m)}
+            autoReview={autoReview}
+            onChangeAutoReview={setAutoReview}
           />
 
           <EvidencePanel
@@ -424,8 +452,6 @@ export function ReviewPanel() {
             onChangeBuild={(v) => setField("buildOutput", v)}
           />
 
-          <PacketSizeRow preview={preview} previewing={previewing} />
-
           {preview?.secret_hits?.length ? (
             <SecretWarning
               hits={preview.secret_hits}
@@ -434,16 +460,22 @@ export function ReviewPanel() {
             />
           ) : null}
 
-          <QuestionRow
-            question={panel.question}
-            onChange={(v) => setField("question", v)}
-            onSend={onSend}
-            sending={sending}
-            disabled={!activeThread}
-          />
-
           <MessagesList messages={messages} onCopyPrompt={onCopyPrompt} />
         </div>
+
+        {/* Composer pinned at the bottom of the sheet. Stays visible
+            regardless of how long the chat scroll grows. */}
+        <Composer
+          question={panel.question}
+          onChange={(v) => setField("question", v)}
+          onSend={onSend}
+          sending={sending}
+          canSend={canSend}
+          autoReview={autoReview}
+          onChangeAutoReview={setAutoReview}
+          packetPreview={preview}
+          previewing={previewing}
+        />
       </SheetContent>
     </Sheet>
   );
@@ -592,36 +624,117 @@ function HistoryPopover({
   );
 }
 
-function ReviewerModeRow({
+/** Subject card: shows the Claude result that's being reviewed. Collapsed
+ *  by default — first 4 lines + a "show more" toggle. The card is part of
+ *  the scroll region so it scrolls out of view as the chat grows. */
+function SubjectCard({
+  text,
+  role,
+  expanded,
+  onToggle,
+}: {
+  text: string | null;
+  role: string | null;
+  expanded: boolean;
+  onToggle: () => void;
+}) {
+  if (!text || !text.trim()) {
+    return (
+      <div className="border-b border-border bg-muted/30 px-4 py-2.5 text-[11.5px] text-muted-foreground">
+        No specific Claude result selected. The reviewer will use whatever
+        evidence you toggle on below.
+      </div>
+    );
+  }
+  // Collapsed preview: first ~4 lines, capped at ~280 chars so a wide
+  // single-line result still gives a peek without dominating the panel.
+  const collapsedPreviewLines = 4;
+  const lines = text.split(/\r?\n/);
+  const isLong = lines.length > collapsedPreviewLines || text.length > 280;
+  const collapsedText = isLong
+    ? lines.slice(0, collapsedPreviewLines).join("\n").slice(0, 280) + "…"
+    : text;
+  return (
+    <div className="border-b border-border bg-muted/20 px-4 py-3">
+      <div className="mb-1.5 flex items-center justify-between">
+        <div className="flex items-center gap-1.5 text-[10.5px] font-medium uppercase tracking-wider text-muted-foreground">
+          <Sparkles className="h-3 w-3" />
+          Reviewing this Claude result
+          {role && <span className="font-mono normal-case">· {role}</span>}
+        </div>
+        {isLong && (
+          <button
+            type="button"
+            onClick={onToggle}
+            className="flex items-center gap-1 text-[11px] text-muted-foreground transition-colors hover:text-foreground"
+          >
+            {expanded ? (
+              <ChevronDown className="h-3 w-3" />
+            ) : (
+              <ChevronRight className="h-3 w-3" />
+            )}
+            {expanded ? "Show less" : "Show more"}
+          </button>
+        )}
+      </div>
+      <pre
+        className={cn(
+          "whitespace-pre-wrap font-sans text-[12.5px] leading-relaxed text-foreground/90",
+          !expanded && isLong && "max-h-[120px] overflow-hidden",
+        )}
+      >
+        {expanded ? text : collapsedText}
+      </pre>
+    </div>
+  );
+}
+
+/** Compact options row: reviewer-mode pills + Auto Review checkbox. The
+ *  codex provider badge already lives in the header, so we keep this row
+ *  short and inline rather than a full mode-card grid. */
+function OptionsRow({
   mode,
-  onChange,
+  onChangeMode,
+  autoReview,
+  onChangeAutoReview,
 }: {
   mode: ReviewerMode;
-  onChange: (m: ReviewerMode) => void;
+  onChangeMode: (m: ReviewerMode) => void;
+  autoReview: boolean;
+  onChangeAutoReview: (v: boolean) => void;
 }) {
   return (
-    <div className="border-b border-border px-4 py-3">
-      <div className="mb-1.5 text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
-        Reviewer mode
-      </div>
-      <div className="flex flex-wrap gap-2">
+    <div className="flex flex-wrap items-center gap-2 border-b border-border px-4 py-2">
+      <div className="flex items-center gap-1.5">
         {REVIEWER_MODES.map((m) => (
           <button
             key={m.id}
-            onClick={() => onChange(m.id)}
+            type="button"
+            onClick={() => onChangeMode(m.id)}
+            title={m.hint}
             className={cn(
-              "rounded-md border px-2.5 py-1 text-left text-[12px]",
+              "rounded-md border px-2 py-1 text-[11.5px] transition-colors",
               mode === m.id
                 ? "border-primary bg-primary/10 text-foreground"
                 : "border-border text-muted-foreground hover:bg-accent/40",
             )}
-            title={m.hint}
           >
-            <div className="font-medium">{m.label}</div>
-            <div className="text-[10.5px] text-muted-foreground">{m.hint}</div>
+            {m.label}
           </button>
         ))}
       </div>
+      <label
+        className="ms-auto flex cursor-pointer items-center gap-1.5 text-[11.5px] text-muted-foreground"
+        title="If checked, sending an empty composer runs a default review of the current evidence."
+      >
+        <input
+          type="checkbox"
+          checked={autoReview}
+          onChange={(e) => onChangeAutoReview(e.target.checked)}
+          className="h-3 w-3"
+        />
+        <span>Auto review this result</span>
+      </label>
     </div>
   );
 }
@@ -666,8 +779,7 @@ function EvidencePanel({
         ) : (
           <ChevronRight className="h-3 w-3" />
         )}
-        <Eye className="h-3 w-3" />
-        <span>Evidence</span>
+        <span>Evidence and technical context</span>
         <span className="font-mono text-[10px] normal-case text-muted-foreground/70">
           {enabled.length}/{EVIDENCE_LABELS.length} on
         </span>
@@ -743,44 +855,9 @@ function EvidencePanel({
   );
 }
 
-function PacketSizeRow({
-  preview,
-  previewing,
-}: {
-  preview: ReviewPreview | null;
-  previewing: boolean;
-}) {
-  if (!preview && !previewing) return null;
-  return (
-    <div className="flex items-center gap-3 border-b border-border bg-muted/20 px-4 py-1.5 text-[11px] text-muted-foreground">
-      {previewing ? (
-        <span className="flex items-center gap-1.5">
-          <Loader2 className="h-3 w-3 animate-spin" />
-          Sizing packet…
-        </span>
-      ) : preview ? (
-        <>
-          <span className="font-mono">
-            {(preview.byte_count / 1024).toFixed(1)} KB
-          </span>
-          <span className="text-muted-foreground/70">·</span>
-          <span className="font-mono">
-            ~{preview.estimated_tokens.toLocaleString()} tokens
-          </span>
-          {preview.git.is_repo && (
-            <>
-              <span className="text-muted-foreground/70">·</span>
-              <span>
-                {preview.git.dirty_count} dirty files
-                {preview.git.diff_truncated && " (diff trimmed)"}
-              </span>
-            </>
-          )}
-        </>
-      ) : null}
-    </div>
-  );
-}
+// PacketSizeRow was a standalone bar between Evidence and the question
+// textarea; it's now replaced by the inline PacketSizePill living next to
+// the Send button in the composer.
 
 function SecretWarning({
   hits,
@@ -817,53 +894,73 @@ function SecretWarning({
   );
 }
 
-function QuestionRow({
+/** Bottom-pinned chat composer. Stays visible regardless of how long the
+ *  message scroll grows. Send is enabled when the textbox has text OR
+ *  Auto Review is checked (an explicit opt-in to send the default review
+ *  with no guidance). The packet size/token estimate is shown inline so
+ *  the user knows what they're about to send. */
+function Composer({
   question,
   onChange,
   onSend,
   sending,
-  disabled,
+  canSend,
+  autoReview,
+  onChangeAutoReview,
+  packetPreview,
+  previewing,
 }: {
   question: string;
   onChange: (v: string) => void;
   onSend: () => void;
   sending: boolean;
-  disabled: boolean;
+  canSend: boolean;
+  autoReview: boolean;
+  onChangeAutoReview: (v: boolean) => void;
+  packetPreview: ReviewPreview | null;
+  previewing: boolean;
 }) {
   const willUseDefault = !question.trim();
-  // Visually-elevated card so the question feels like the primary action,
-  // not a peer of the evidence checkboxes above it.
   return (
-    <div className="border-b border-border bg-primary/5 px-4 py-3.5">
-      <div className="mb-1.5 flex items-center justify-between text-[11px] font-medium uppercase tracking-wider text-primary/80">
-        <span>Your question</span>
-        <span className="font-normal normal-case text-muted-foreground/70">
-          optional
-        </span>
-      </div>
+    <div className="shrink-0 border-t border-border bg-card/40 px-4 pb-3 pt-2">
       <textarea
         value={question}
-        placeholder="Optional: tell the reviewer what to focus on. Leave blank for a general review."
+        placeholder="Guide the reviewer. Example: Focus on architecture risk and help me write the next Claude prompt."
         onChange={(e) => onChange(e.target.value)}
         onKeyDown={(e) => {
           if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
             e.preventDefault();
-            onSend();
+            if (canSend) onSend();
           }
         }}
-        className="block w-full resize-y rounded-md border border-primary/30 bg-background px-3 py-2 text-[13px] outline-none placeholder:text-muted-foreground/60 focus:border-primary/60 min-h-[110px]"
+        className="block w-full resize-y rounded-md border border-border bg-background px-3 py-2 text-[13px] outline-none placeholder:text-muted-foreground/60 focus:border-primary/60 min-h-[80px]"
       />
-      <div className="mt-2 flex items-center gap-2">
+      <div className="mt-2 flex flex-wrap items-center gap-2">
+        <label
+          className="flex cursor-pointer items-center gap-1.5 text-[11.5px] text-muted-foreground"
+          title="If checked, sending an empty composer runs a default review of the current evidence."
+        >
+          <input
+            type="checkbox"
+            checked={autoReview}
+            onChange={(e) => onChangeAutoReview(e.target.checked)}
+            className="h-3 w-3"
+          />
+          <span>Auto review this result</span>
+        </label>
+        <PacketSizePill preview={packetPreview} previewing={previewing} />
         <Button
           onClick={onSend}
           size="sm"
-          className="h-7"
-          disabled={sending || disabled}
+          className="ms-auto h-7"
+          disabled={!canSend}
           title={
-            disabled
-              ? "Create or select a thread first"
+            !canSend
+              ? willUseDefault && !autoReview
+                ? "Type guidance, or check Auto Review to send a default review."
+                : "Send to reviewer"
               : willUseDefault
-              ? "Send a general review (Cmd-Enter)"
+              ? "Send a default review (Cmd-Enter)"
               : "Send to reviewer (Cmd-Enter)"
           }
         >
@@ -874,20 +971,39 @@ function QuestionRow({
           )}
           {sending
             ? "Sending…"
-            : willUseDefault
-            ? "Send (general review)"
-            : "Send to reviewer"}
+            : willUseDefault && autoReview
+            ? "Send (default review)"
+            : "Send"}
         </Button>
-        {willUseDefault && !disabled && (
-          <span className="text-[10.5px] text-muted-foreground/80">
-            Will use a default review prompt.
-          </span>
-        )}
-        <span className="ms-auto text-[10px] text-muted-foreground">
-          ⌘ + Enter
-        </span>
       </div>
     </div>
+  );
+}
+
+/** Inline packet-size hint shown next to the Send button. Quietly lets the
+ *  user see the size estimate without giving the evidence section a whole
+ *  status row of its own. */
+function PacketSizePill({
+  preview,
+  previewing,
+}: {
+  preview: ReviewPreview | null;
+  previewing: boolean;
+}) {
+  if (previewing && !preview) {
+    return (
+      <span className="flex items-center gap-1 text-[11px] text-muted-foreground/80">
+        <Loader2 className="h-3 w-3 animate-spin" />
+        sizing…
+      </span>
+    );
+  }
+  if (!preview) return null;
+  return (
+    <span className="text-[11px] text-muted-foreground/80">
+      ~{preview.estimated_tokens.toLocaleString()} tokens
+      {preview.git.is_repo && preview.git.diff_truncated && " · diff trimmed"}
+    </span>
   );
 }
 
@@ -1018,46 +1134,43 @@ function CriticalReviewView({
   fullContent: string;
   onCopyPrompt: (prompt: string) => void;
 }) {
-  const promptToCopy = parsed.nextPrompt ?? copyTargetForReply(fullContent);
   return (
     <div className="space-y-3 text-[13px] leading-relaxed">
-      <VerdictBadge verdict={parsed.verdict} raw={parsed.verdictRaw} />
-
-      {parsed.keyFindings.length > 0 && (
-        <Section title="Key findings">
-          <ul className="space-y-1">
-            {parsed.keyFindings.slice(0, 3).map((f, i) => (
-              <li key={i} className="flex gap-2">
-                <span className="mt-[6px] h-1 w-1 shrink-0 rounded-full bg-foreground/60" />
-                <span>{f}</span>
-              </li>
-            ))}
-          </ul>
-        </Section>
+      {parsed.verdict && (
+        <p className="text-[14px] font-medium text-foreground">
+          {parsed.verdict}
+        </p>
       )}
 
-      {parsed.mainRisk && (
-        <Section title="Main risk">
-          <p className="text-foreground/90">{parsed.mainRisk}</p>
-        </Section>
+      {parsed.why.length > 0 && (
+        <ul className="space-y-1 text-foreground/90">
+          {parsed.why.slice(0, 3).map((f, i) => (
+            <li key={i} className="flex gap-2">
+              <span className="mt-[7px] h-1 w-1 shrink-0 rounded-full bg-foreground/60" />
+              <span>{f}</span>
+            </li>
+          ))}
+        </ul>
       )}
 
-      {parsed.recommendedNextStep && (
-        <Section title="Recommended next step">
-          <p className="text-foreground/90">{parsed.recommendedNextStep}</p>
-        </Section>
+      {parsed.nextAction && (
+        <p className="text-foreground/90">
+          <span className="font-semibold text-foreground">Next: </span>
+          {parsed.nextAction}
+        </p>
       )}
 
       {parsed.nextPrompt ? (
         <NextPromptBox
-          label="Next prompt for Claude Code"
+          label="Prompt to send Claude"
           prompt={parsed.nextPrompt}
-          onCopy={() => onCopyPrompt(promptToCopy)}
+          onCopy={() => onCopyPrompt(parsed.nextPrompt!)}
         />
       ) : (
-        <FallbackCopyRow onCopy={() => onCopyPrompt(promptToCopy)} />
+        <NoPromptHint />
       )}
 
+      {parsed.details && <CollapsibleDetails text={parsed.details} />}
       <ShowFullReviewToggle content={fullContent} />
     </div>
   );
@@ -1076,7 +1189,6 @@ function CoachReviewView({
   fullContent: string;
   onCopyPrompt: (prompt: string) => void;
 }) {
-  const promptToCopy = parsed.improvedPrompt ?? copyTargetForReply(fullContent);
   return (
     <div className="space-y-3 text-[13px] leading-relaxed">
       {parsed.clarifiedIntent && (
@@ -1089,10 +1201,10 @@ function CoachReviewView({
         <NextPromptBox
           label="Improved prompt"
           prompt={parsed.improvedPrompt}
-          onCopy={() => onCopyPrompt(promptToCopy)}
+          onCopy={() => onCopyPrompt(parsed.improvedPrompt!)}
         />
       ) : (
-        <FallbackCopyRow onCopy={() => onCopyPrompt(promptToCopy)} />
+        <NoPromptHint />
       )}
 
       {parsed.whyThisIsBetter.length > 0 && (
@@ -1108,6 +1220,7 @@ function CoachReviewView({
         </Section>
       )}
 
+      {parsed.details && <CollapsibleDetails text={parsed.details} />}
       <ShowFullReviewToggle content={fullContent} />
     </div>
   );
@@ -1124,18 +1237,28 @@ function RawReviewerView({
   msg: ReviewMessage;
   onCopyPrompt: (prompt: string) => void;
 }) {
-  // Heuristic: try the legacy extractor for a "NEXT PROMPT…" section.
-  const heuristic = copyTargetForReply(msg.content);
+  // Even when the parser bailed, the model may still have written one of
+  // the recognized prompt headings. The strict extractor returns null
+  // when no heading is present — we never copy a "best guess" of the
+  // whole reply.
+  const extracted = copyTargetForReply(msg.content);
   return (
     <div className="space-y-3 text-[13px] leading-relaxed">
       <div className="rounded-md border border-amber-500/40 bg-amber-500/10 p-2 text-[11px] text-amber-700 dark:text-amber-300">
-        Couldn't parse a structured response — showing the raw reply
-        below. You can still copy a best-guess prompt with the button.
+        Couldn't parse a structured response — showing the raw reply below.
       </div>
       <pre className="whitespace-pre-wrap font-sans text-[12.5px]">
         {msg.content}
       </pre>
-      <FallbackCopyRow onCopy={() => onCopyPrompt(heuristic)} />
+      {extracted ? (
+        <NextPromptBox
+          label="Prompt to send Claude"
+          prompt={extracted}
+          onCopy={() => onCopyPrompt(extracted)}
+        />
+      ) : (
+        <NoPromptHint />
+      )}
     </div>
   );
 }
@@ -1161,53 +1284,42 @@ function Section({
   );
 }
 
-const VERDICT_TONE_CLASSES: Record<
-  "ok" | "warn" | "danger" | "stop",
-  string
-> = {
-  ok: "border-emerald-500/40 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300",
-  warn: "border-amber-500/40 bg-amber-500/10 text-amber-700 dark:text-amber-300",
-  danger:
-    "border-orange-500/50 bg-orange-500/10 text-orange-700 dark:text-orange-300",
-  stop: "border-destructive/50 bg-destructive/10 text-destructive",
-};
-
-function VerdictBadge({
-  verdict,
-  raw,
-}: {
-  verdict: Verdict | null;
-  raw: string | null;
-}) {
-  if (!verdict) {
-    // Reviewer wrote something in VERDICT but it didn't classify. Show
-    // the raw text in a neutral pill so the user still sees the call.
-    if (!raw) return null;
-    return (
-      <div className="inline-flex items-center gap-1.5 rounded-md border border-border bg-muted/40 px-2 py-1 text-[12px] font-medium">
-        <Eye className="h-3.5 w-3.5" />
-        {raw}
-      </div>
-    );
-  }
-  const display = VERDICT_DISPLAY[verdict];
-  const Icon =
-    display.tone === "ok"
-      ? CheckCircle2
-      : display.tone === "warn"
-      ? AlertTriangle
-      : display.tone === "danger"
-      ? AlertCircle
-      : OctagonAlert;
+/** Inline hint shown when the reviewer didn't include a copy-ready
+ *  prompt section. Per spec, we don't copy a "best guess" of the whole
+ *  reply — we tell the user nothing was extracted instead. */
+function NoPromptHint() {
   return (
-    <div
-      className={cn(
-        "inline-flex items-center gap-1.5 rounded-md border px-2.5 py-1 text-[12.5px] font-semibold",
-        VERDICT_TONE_CLASSES[display.tone],
+    <div className="rounded-md border border-dashed border-border bg-muted/30 px-3 py-2 text-[11.5px] text-muted-foreground">
+      No prompt found yet — ask the reviewer to write one (or try a
+      follow-up like "give me the prompt to send Claude").
+    </div>
+  );
+}
+
+/** Inline collapsible "Details" section the model writes only when the
+ *  user explicitly asked for deeper analysis. Default-collapsed so the
+ *  conversational view stays brief. */
+function CollapsibleDetails({ text }: { text: string }) {
+  const [open, setOpen] = React.useState(false);
+  return (
+    <div>
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className="flex items-center gap-1.5 text-[11px] text-muted-foreground transition-colors hover:text-foreground"
+      >
+        {open ? (
+          <ChevronDown className="h-3 w-3" />
+        ) : (
+          <ChevronRight className="h-3 w-3" />
+        )}
+        {open ? "Hide details" : "More details"}
+      </button>
+      {open && (
+        <p className="mt-1.5 text-foreground/85 whitespace-pre-wrap">
+          {text}
+        </p>
       )}
-    >
-      <Icon className="h-4 w-4" />
-      {display.label}
     </div>
   );
 }
@@ -1245,22 +1357,9 @@ function NextPromptBox({
   );
 }
 
-function FallbackCopyRow({ onCopy }: { onCopy: () => void }) {
-  return (
-    <div className="flex justify-end">
-      <Button
-        size="sm"
-        variant="outline"
-        className="h-7"
-        onClick={onCopy}
-        title="Best-effort copy of any embedded next prompt"
-      >
-        <Copy className="h-3 w-3" />
-        Copy next prompt
-      </Button>
-    </div>
-  );
-}
+// FallbackCopyRow was a "best-guess copy" fallback; per the chat-UX spec
+// we never copy a guess of the whole reply. RawReviewerView now uses
+// NextPromptBox if a heading was extractable, NoPromptHint otherwise.
 
 function ShowFullReviewToggle({ content }: { content: string }) {
   const [open, setOpen] = React.useState(false);

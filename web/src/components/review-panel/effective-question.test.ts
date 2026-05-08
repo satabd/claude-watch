@@ -31,10 +31,11 @@ describe("effectiveQuestion", () => {
     }
   });
 
-  it("default question mentions the structured review surface", () => {
+  it("default question asks for a next prompt to send Claude Code", () => {
     // Sanity guard: if someone changes the default, they should think about
-    // whether it still asks for a 'next best prompt for Claude Code'.
-    expect(DEFAULT_QUESTION.toLowerCase()).toContain("next best prompt");
-    expect(DEFAULT_QUESTION.toLowerCase()).toContain("claude code");
+    // whether it still asks for a copy-ready prompt to send back.
+    const lower = DEFAULT_QUESTION.toLowerCase();
+    expect(lower).toContain("next prompt");
+    expect(lower).toContain("claude code");
   });
 });

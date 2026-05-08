@@ -81,20 +81,20 @@ def test_critical_prompt_requests_structured_section_labels():
     pkt = build_packet(_make_inputs(reviewer_mode="critical"), _clean_git())
     for label in (
         "VERDICT:",
-        "KEY FINDINGS:",
-        "MAIN RISK:",
-        "RECOMMENDED NEXT STEP:",
-        "NEXT PROMPT FOR CLAUDE CODE:",
-        "DETAILS:",
+        "WHY:",
+        "NEXT ACTION:",
+        "PROMPT TO SEND CLAUDE:",
     ):
         assert label in pkt.prompt, f"missing {label!r} in critical prompt"
-    # All four allowed verdicts must be enumerated for the model to pick
-    # from, otherwise it might invent its own and the parser will return
-    # verdict=None.
-    assert "Good to proceed" in pkt.prompt
-    assert "Proceed with caution" in pkt.prompt
-    assert "Needs fix before continuing" in pkt.prompt
-    assert "Stop and investigate" in pkt.prompt
+    # DETAILS is conditional — instructions must mention it without REQUIRING
+    # it on every reply. The literal "DETAILS:" appears in the instructions
+    # themselves so the parser still has the label registered.
+    assert "DETAILS" in pkt.prompt
+    # The instructions should now ask for a one-sentence verdict (no
+    # enumerated phrase list) and explicitly tell the model to keep replies
+    # short / chatty — this is a back-and-forth, not a formal writeup.
+    assert "ONE sentence" in pkt.prompt
+    assert "back-and-forth" in pkt.prompt or "chatty" in pkt.prompt
 
 
 def test_coach_prompt_requests_structured_section_labels():

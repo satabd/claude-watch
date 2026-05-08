@@ -11,9 +11,11 @@
  */
 
 const HEADING_PATTERNS: RegExp[] = [
-  // The exact prompt-coach / critical-reviewer instruction asks for this
-  // verbatim heading. Match it case-insensitively, with optional leading
-  // numbering ("6. NEXT PROMPT…") and trailing punctuation/colon.
+  // Current chat-style critical reviewer asks for this verbatim heading.
+  /^\s*(?:\d+[.)]\s*)?(?:#{1,4}\s*)?(?:\*\*\s*)?prompt\s+to\s+send\s+claude(?:\s+code)?\s*(?:\*\*)?\s*[:.\-—]?\s*$/im,
+  // Older critical-reviewer / prompt-coach instruction asked for this
+  // verbatim heading. Kept for back-compat with messages from before the
+  // chat-UX overhaul.
   /^\s*(?:\d+[.)]\s*)?(?:#{1,4}\s*)?(?:\*\*\s*)?next\s+prompt\s+for\s+claude(?:\s+code)?\s*(?:\*\*)?\s*[:.\-—]?\s*$/im,
   // Looser fallback: bold or heading variants without "code".
   /^\s*(?:#{1,4}\s*)?(?:\*\*\s*)?next\s+prompt\s*(?:\*\*)?\s*[:.\-—]?\s*$/im,
@@ -60,9 +62,14 @@ export function extractNextPrompt(reply: string): string | null {
   return null;
 }
 
-/** Best effort: return either the extracted next prompt or the full reply,
- *  so the Copy button always gives the user something useful. */
-export function copyTargetForReply(reply: string): string {
+/** Strict extractor: returns the extracted next-prompt section if a
+ *  recognized heading exists in the reply, otherwise null.
+ *
+ *  Older versions returned the full reply as a fallback; that produced
+ *  "bad guess" copy results when the model didn't follow the format.
+ *  The new chat UX prefers showing "No prompt found yet" over copying a
+ *  block of unrelated text. */
+export function copyTargetForReply(reply: string): string | null {
   const extracted = extractNextPrompt(reply);
-  return (extracted ?? reply).trim();
+  return extracted ? extracted.trim() : null;
 }

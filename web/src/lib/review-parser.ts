@@ -1,34 +1,39 @@
-/** Parses a structured reviewer reply (Critical Reviewer / Prompt Coach)
- *  into a typed shape the panel can render as a compact action-oriented
- *  summary. The reviewer is asked (in server/review_packet.py) to use
- *  literal uppercase labels followed by a colon, e.g. ``VERDICT:``,
- *  ``KEY FINDINGS:``, ``NEXT PROMPT FOR CLAUDE CODE:``.
+/** Parses a structured reviewer reply into a typed shape the chat-style
+ *  panel can render conversationally. The reviewer is asked (in
+ *  server/review_packet.py) to use literal uppercase labels followed by a
+ *  colon, e.g. ``VERDICT:``, ``WHY:``, ``PROMPT TO SEND CLAUDE:``.
  *
- *  When the model deviates from the format, the parsers return ``parsed:
- *  false``; the UI then falls back to the raw text view, while still
- *  using the legacy ``copyTargetForReply`` helper to extract a
- *  copy-ready prompt heuristically.
+ *  Older replies that used the previous label set (``KEY FINDINGS``,
+ *  ``RECOMMENDED NEXT STEP``, ``NEXT PROMPT FOR CLAUDE CODE``) still parse
+ *  correctly — the section splitter recognises both, and the field
+ *  resolver picks whichever was present.
+ *
+ *  When the model deviates from the format entirely, the parsers return
+ *  ``parsed: false``; the UI then falls back to the raw text view.
  */
 
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
 
-export type Verdict = "good" | "caution" | "needs_fix" | "stop";
-
 export interface CriticalReview {
-  /** Normalized 4-state verdict, or null when the reply didn't contain a
-   *  recognizable phrase. */
-  verdict: Verdict | null;
-  /** The raw verdict line as the reviewer wrote it, for display. */
-  verdictRaw: string | null;
-  keyFindings: string[];
-  mainRisk: string | null;
-  recommendedNextStep: string | null;
+  /** Free-form one-sentence verdict. The chat-UX dropped the fixed
+   *  enumerated phrase set; the reviewer now writes their own. */
+  verdict: string | null;
+  /** "Why this verdict" — short bullets. Built from the WHY section, or
+   *  the legacy KEY FINDINGS section for back-compat. */
+  why: string[];
+  /** What the user should do next. Built from NEXT ACTION, or the legacy
+   *  RECOMMENDED NEXT STEP. */
+  nextAction: string | null;
+  /** The copy-ready prompt to paste back to Claude Code. Built from
+   *  PROMPT TO SEND CLAUDE, or the legacy NEXT PROMPT FOR CLAUDE CODE. */
   nextPrompt: string | null;
+  /** Optional deeper explanation. Only present when the user asked the
+   *  reviewer for more detail. */
   details: string | null;
-  /** True when at least one of the structured sections was found. UI uses
-   *  this to decide between the compact view and the raw fallback view. */
+  /** True when at least one structured section was found. UI uses this to
+   *  decide between the conversational view and the raw fallback. */
   parsed: boolean;
 }
 
@@ -41,27 +46,21 @@ export interface CoachReview {
 }
 
 // ---------------------------------------------------------------------------
-// Verdict labels (UI-facing copy + tone for badge color)
-// ---------------------------------------------------------------------------
-
-export const VERDICT_DISPLAY: Record<Verdict, { label: string; tone: "ok" | "warn" | "danger" | "stop" }> = {
-  good: { label: "Good to proceed", tone: "ok" },
-  caution: { label: "Proceed with caution", tone: "warn" },
-  needs_fix: { label: "Needs fix before continuing", tone: "danger" },
-  stop: { label: "Stop and investigate", tone: "stop" },
-};
-
-// ---------------------------------------------------------------------------
 // Section splitter
 // ---------------------------------------------------------------------------
 
 const KNOWN_HEADINGS = [
   "VERDICT",
+  "WHY",
+  "NEXT ACTION",
+  "PROMPT TO SEND CLAUDE",
+  "DETAILS",
+  // Legacy critical-reviewer labels — still parsed for back-compat.
   "KEY FINDINGS",
   "MAIN RISK",
   "RECOMMENDED NEXT STEP",
   "NEXT PROMPT FOR CLAUDE CODE",
-  "DETAILS",
+  // Coach mode labels (unchanged).
   "CLARIFIED INTENT",
   "IMPROVED PROMPT",
   "WHY THIS IS BETTER",
@@ -123,9 +122,7 @@ function parseSections(text: string): Map<KnownHeading, string> {
  *  - leading "-", "*", "•" or "1." / "1)" markers
  *  - multi-line bullets (continuation lines without a marker are appended
  *    to the previous bullet, joined by a space)
- *  - bullet-less prose (treated as a single-bullet list)
- *
- *  Caps the result at ``max`` to enforce the spec's "at most 3 bullets" UX. */
+ *  - bullet-less prose (treated as a single-bullet list) */
 export function parseBullets(text: string, max = 6): string[] {
   if (!text) return [];
   const out: string[] = [];
@@ -161,28 +158,6 @@ export function stripFences(text: string): string {
 }
 
 // ---------------------------------------------------------------------------
-// Verdict classifier
-// ---------------------------------------------------------------------------
-
-const VERDICT_KEYWORDS: { v: Verdict; keys: string[] }[] = [
-  { v: "good", keys: ["good to proceed"] },
-  { v: "caution", keys: ["proceed with caution"] },
-  { v: "needs_fix", keys: ["needs fix", "needs fixing", "fix before continuing"] },
-  { v: "stop", keys: ["stop and investigate", "stop", "investigate"] },
-];
-
-export function classifyVerdict(raw: string | null): Verdict | null {
-  if (!raw) return null;
-  const t = raw.toLowerCase();
-  for (const { v, keys } of VERDICT_KEYWORDS) {
-    for (const k of keys) {
-      if (t.includes(k)) return v;
-    }
-  }
-  return null;
-}
-
-// ---------------------------------------------------------------------------
 // Public parsers
 // ---------------------------------------------------------------------------
 
@@ -194,41 +169,56 @@ export function parseCriticalReview(text: string): CriticalReview {
   if (!text || !text.trim()) {
     return {
       verdict: null,
-      verdictRaw: null,
-      keyFindings: [],
-      mainRisk: null,
-      recommendedNextStep: null,
+      why: [],
+      nextAction: null,
       nextPrompt: null,
       details: null,
       parsed: false,
     };
   }
   const sections = parseSections(text);
-  const verdictBody = sections.get("VERDICT")?.trim() || null;
-  // Verdict is a single line; if the model wrote multiple, take the first
-  // non-empty one for classification but keep the body for display.
-  const verdictLine = verdictBody?.split(/\r?\n/).find((ln) => ln.trim()) ?? null;
-  const verdict = classifyVerdict(verdictLine);
-  const keyFindings = parseBullets(sections.get("KEY FINDINGS") ?? "", 5);
-  const mainRisk = sections.get("MAIN RISK")?.trim() || null;
-  const recommendedNextStep = sections.get("RECOMMENDED NEXT STEP")?.trim() || null;
-  const rawNextPrompt = sections.get("NEXT PROMPT FOR CLAUDE CODE")?.trim() || null;
-  const nextPrompt = rawNextPrompt ? stripFences(rawNextPrompt) : null;
+  const verdictBody = sections.get("VERDICT")?.trim();
+  // Verdict is now a free-form sentence. Take the section body verbatim
+  // (stripped of leading/trailing whitespace) so multi-line verdicts
+  // round-trip cleanly. If the model wrote something blank, we treat
+  // verdict as missing.
+  const verdict = verdictBody && verdictBody.length > 0 ? verdictBody : null;
+
+  const whyBody = sections.get("WHY") ?? sections.get("KEY FINDINGS") ?? "";
+  const why = parseBullets(whyBody, 5);
+
+  // NEXT ACTION (current) or RECOMMENDED NEXT STEP (legacy). MAIN RISK is
+  // not exposed as its own field anymore; if the model wrote it, fold it
+  // into the action so the user still sees the content.
+  const nextActionBody =
+    sections.get("NEXT ACTION") ?? sections.get("RECOMMENDED NEXT STEP") ?? null;
+  const mainRiskBody = sections.get("MAIN RISK") ?? null;
+  const nextAction =
+    nextActionBody && nextActionBody.trim()
+      ? nextActionBody.trim()
+      : mainRiskBody && mainRiskBody.trim()
+      ? mainRiskBody.trim()
+      : null;
+
+  const rawNextPrompt =
+    sections.get("PROMPT TO SEND CLAUDE") ??
+    sections.get("NEXT PROMPT FOR CLAUDE CODE") ??
+    null;
+  const nextPrompt =
+    rawNextPrompt && rawNextPrompt.trim() ? stripFences(rawNextPrompt) : null;
+
   const details = sections.get("DETAILS")?.trim() || null;
+
   const parsed = !!(
     verdict ||
-    verdictLine ||
-    keyFindings.length ||
-    mainRisk ||
-    recommendedNextStep ||
+    why.length ||
+    nextAction ||
     nextPrompt
   );
   return {
     verdict,
-    verdictRaw: verdictLine,
-    keyFindings,
-    mainRisk,
-    recommendedNextStep,
+    why,
+    nextAction,
     nextPrompt,
     details,
     parsed,
@@ -250,7 +240,10 @@ export function parseCoachReview(text: string): CoachReview {
   const clarifiedIntent = sections.get("CLARIFIED INTENT")?.trim() || null;
   const rawImproved = sections.get("IMPROVED PROMPT")?.trim() || null;
   const improvedPrompt = rawImproved ? stripFences(rawImproved) : null;
-  const whyThisIsBetter = parseBullets(sections.get("WHY THIS IS BETTER") ?? "", 5);
+  const whyThisIsBetter = parseBullets(
+    sections.get("WHY THIS IS BETTER") ?? "",
+    5,
+  );
   const details = sections.get("DETAILS")?.trim() || null;
   const parsed = !!(clarifiedIntent || improvedPrompt || whyThisIsBetter.length);
   return {

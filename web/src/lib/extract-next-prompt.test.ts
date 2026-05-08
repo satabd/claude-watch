@@ -69,17 +69,39 @@ describe("extractNextPrompt", () => {
   });
 });
 
+describe("extractNextPrompt — chat-UX heading aliases", () => {
+  it("recognizes 'PROMPT TO SEND CLAUDE' (current)", () => {
+    const reply = [
+      "VERDICT:",
+      "Looks fine.",
+      "",
+      "PROMPT TO SEND CLAUDE:",
+      "Add the missing edge case.",
+    ].join("\n");
+    expect(extractNextPrompt(reply)).toBe("Add the missing edge case.");
+  });
+
+  it("still recognizes the old 'NEXT PROMPT FOR CLAUDE CODE' heading", () => {
+    const reply = "NEXT PROMPT FOR CLAUDE CODE:\nLegacy form.";
+    expect(extractNextPrompt(reply)).toBe("Legacy form.");
+  });
+});
+
 describe("copyTargetForReply", () => {
   it("returns the extracted prompt when present", () => {
     const reply = [
-      "## NEXT PROMPT FOR CLAUDE CODE",
+      "PROMPT TO SEND CLAUDE:",
       "Do the thing.",
     ].join("\n");
     expect(copyTargetForReply(reply)).toBe("Do the thing.");
   });
 
-  it("falls back to the full reply when no heading is present", () => {
+  it("returns null when no recognized heading is present (no bad guess)", () => {
     const full = "Some reviewer reply without a structured next prompt.";
-    expect(copyTargetForReply(full)).toBe(full);
+    expect(copyTargetForReply(full)).toBeNull();
+  });
+
+  it("returns null on empty input", () => {
+    expect(copyTargetForReply("")).toBeNull();
   });
 });

@@ -1,6 +1,5 @@
 import { describe, expect, it } from "vitest";
 import {
-  classifyVerdict,
   parseBullets,
   parseCoachReview,
   parseCriticalReview,
@@ -8,32 +7,21 @@ import {
 } from "./review-parser";
 
 const SAMPLE_CRITICAL = `VERDICT:
-Proceed with caution
+The change looks good but the test coverage is thin.
 
-KEY FINDINGS:
+WHY:
 - The migration is reversible.
-- Tests cover happy path only.
+- Tests cover only the happy path.
 - The auto-expand effect can fight user collapse.
 
-MAIN RISK:
-The auto-expand effect re-runs after every state change, which can
-silently override the user's explicit collapse action.
+NEXT ACTION:
+Tighten the auto-expand guard so it only fires when the user
+hasn't expressed an opinion yet (persistedOpen === undefined).
 
-RECOMMENDED NEXT STEP:
-Tighten the guard to only fire when the user hasn't expressed an
-opinion yet (persistedOpen === undefined).
-
-NEXT PROMPT FOR CLAUDE CODE:
+PROMPT TO SEND CLAUDE:
 Update sidebar.tsx so the auto-expand effect only fires when
 persistedOpen === undefined. Add a unit test covering "user collapses
 a project that contains the active session, state must remain false".
-
-DETAILS:
-This applies to the ProjectTreeNode component in
-web/src/components/sidebar.tsx around line 117. The bug surfaces when
-a user clicks a session inside a project then collapses that project's
-header — the click is silently no-oped because the next render cycle
-re-expands it.
 `;
 
 const SAMPLE_COACH = `CLARIFIED INTENT:
@@ -56,40 +44,57 @@ DETAILS:
 The previous prompt said "clean up the parser" which is too vague.
 `;
 
-// ---------------------------------------------------------------------------
-// parseCriticalReview
-// ---------------------------------------------------------------------------
+// Older format that predates the chat-UX overhaul. Verifies back-compat:
+// new field names map onto the legacy section labels.
+const SAMPLE_CRITICAL_LEGACY = `VERDICT:
+Proceed with caution
 
-describe("parseCriticalReview", () => {
-  it("extracts all sections from a normal reply", () => {
-    const r = parseCriticalReview(SAMPLE_CRITICAL);
-    expect(r.parsed).toBe(true);
-    expect(r.verdict).toBe("caution");
-    expect(r.verdictRaw).toBe("Proceed with caution");
-    expect(r.keyFindings.length).toBe(3);
-    expect(r.keyFindings[0]).toContain("migration is reversible");
-    expect(r.keyFindings[2]).toContain("auto-expand");
-    expect(r.mainRisk).toContain("auto-expand effect re-runs");
-    expect(r.recommendedNextStep).toContain("Tighten the guard");
-    expect(r.nextPrompt).toContain("persistedOpen === undefined");
-    expect(r.nextPrompt).not.toContain("DETAILS");
-    expect(r.details).toContain("ProjectTreeNode component");
-  });
+KEY FINDINGS:
+- old finding 1
+- old finding 2
 
-  it("handles missing DETAILS section", () => {
-    const text = SAMPLE_CRITICAL.replace(/DETAILS:[\s\S]*$/, "").trim();
-    const r = parseCriticalReview(text);
-    expect(r.parsed).toBe(true);
-    expect(r.verdict).toBe("caution");
-    expect(r.details).toBeNull();
-    expect(r.nextPrompt).toContain("persistedOpen");
-  });
+MAIN RISK:
+A subtle race when the watcher reconnects mid-poll.
 
-  it("strips a fenced code block from NEXT PROMPT FOR CLAUDE CODE", () => {
-    const text = `VERDICT:
-Good to proceed
+RECOMMENDED NEXT STEP:
+Add a retry counter on the SSH connection.
 
 NEXT PROMPT FOR CLAUDE CODE:
+Add a retry counter, capped at 5, with exponential backoff.
+`;
+
+// ---------------------------------------------------------------------------
+// parseCriticalReview — current chat-UX format
+// ---------------------------------------------------------------------------
+
+describe("parseCriticalReview (chat format)", () => {
+  it("extracts verdict / why / nextAction / nextPrompt", () => {
+    const r = parseCriticalReview(SAMPLE_CRITICAL);
+    expect(r.parsed).toBe(true);
+    expect(r.verdict).toContain("test coverage is thin");
+    expect(r.why.length).toBe(3);
+    expect(r.why[0]).toContain("migration is reversible");
+    expect(r.why[2]).toContain("auto-expand effect");
+    expect(r.nextAction).toContain("Tighten the auto-expand guard");
+    expect(r.nextPrompt).toContain("persistedOpen === undefined");
+    expect(r.nextPrompt).not.toContain("PROMPT TO SEND CLAUDE");
+    // DETAILS isn't required in the chat format — should be null here.
+    expect(r.details).toBeNull();
+  });
+
+  it("verdict is the free-form section body, not a fixed enum", () => {
+    const r = parseCriticalReview(SAMPLE_CRITICAL);
+    // No classifier; verdict is whatever the model wrote.
+    expect(typeof r.verdict).toBe("string");
+    expect(r.verdict).not.toBe("good");
+    expect(r.verdict).not.toBe("caution");
+  });
+
+  it("strips fenced code blocks from PROMPT TO SEND CLAUDE", () => {
+    const text = `VERDICT:
+Looks fine.
+
+PROMPT TO SEND CLAUDE:
 \`\`\`text
 Add a smoke test that opens the panel with no threads and asserts
 auto-create runs exactly once.
@@ -102,65 +107,83 @@ auto-create runs exactly once.
     expect(r.nextPrompt).not.toContain("```");
   });
 
-  it("classifies all four verdict phrases", () => {
-    const cases: [string, "good" | "caution" | "needs_fix" | "stop"][] = [
-      ["Good to proceed", "good"],
-      ["Proceed with caution", "caution"],
-      ["Needs fix before continuing", "needs_fix"],
-      ["Stop and investigate", "stop"],
-    ];
-    for (const [phrase, expected] of cases) {
-      const r = parseCriticalReview(`VERDICT:\n${phrase}\n\nMAIN RISK:\nx`);
-      expect(r.verdict).toBe(expected);
-    }
+  it("optional DETAILS section is captured when the model includes it", () => {
+    const text = SAMPLE_CRITICAL + "\nDETAILS:\nMore explanation here.\n";
+    const r = parseCriticalReview(text);
+    expect(r.details).toContain("More explanation");
   });
 
-  it("falls back to parsed=false on a free-form reply with no headings", () => {
-    const r = parseCriticalReview(
-      "I think this is pretty good but the tests are thin. Maybe write more tests next.",
-    );
-    expect(r.parsed).toBe(false);
-    expect(r.verdict).toBeNull();
-    expect(r.keyFindings).toEqual([]);
+  it("partial reply (verdict only) still parses", () => {
+    const text = `VERDICT:\nLooks good.\n`;
+    const r = parseCriticalReview(text);
+    expect(r.parsed).toBe(true);
+    expect(r.verdict).toBe("Looks good.");
+    expect(r.why).toEqual([]);
     expect(r.nextPrompt).toBeNull();
   });
 
-  it("handles empty / whitespace input without throwing", () => {
+  it("free-form reply with no labels → parsed=false, all fields null/empty", () => {
+    const r = parseCriticalReview(
+      "I think this is fine; maybe write more tests.",
+    );
+    expect(r.parsed).toBe(false);
+    expect(r.verdict).toBeNull();
+    expect(r.why).toEqual([]);
+    expect(r.nextAction).toBeNull();
+    expect(r.nextPrompt).toBeNull();
+  });
+
+  it("empty / whitespace input doesn't throw", () => {
     expect(parseCriticalReview("").parsed).toBe(false);
-    expect(parseCriticalReview("   \n\t\n").parsed).toBe(false);
+    expect(parseCriticalReview("   \n\t").parsed).toBe(false);
   });
 
   it("tolerates markdown bold around headings", () => {
     const text = `**VERDICT:**
-Good to proceed
+Looks good.
 
-**KEY FINDINGS:**
+**WHY:**
 - one
 - two
 
-**NEXT PROMPT FOR CLAUDE CODE:**
+**PROMPT TO SEND CLAUDE:**
 do the thing.
 `;
     const r = parseCriticalReview(text);
     expect(r.parsed).toBe(true);
-    expect(r.verdict).toBe("good");
-    expect(r.keyFindings).toEqual(["one", "two"]);
+    expect(r.verdict).toBe("Looks good.");
+    expect(r.why).toEqual(["one", "two"]);
     expect(r.nextPrompt).toBe("do the thing.");
-  });
-
-  it("partial reply with only some sections still parses", () => {
-    const text = `VERDICT:\nGood to proceed\n\nNEXT PROMPT FOR CLAUDE CODE:\nproceed.\n`;
-    const r = parseCriticalReview(text);
-    expect(r.parsed).toBe(true);
-    expect(r.verdict).toBe("good");
-    expect(r.keyFindings).toEqual([]);
-    expect(r.mainRisk).toBeNull();
-    expect(r.nextPrompt).toBe("proceed.");
   });
 });
 
 // ---------------------------------------------------------------------------
-// parseCoachReview
+// parseCriticalReview — legacy back-compat
+// ---------------------------------------------------------------------------
+
+describe("parseCriticalReview (legacy format back-compat)", () => {
+  it("maps KEY FINDINGS → why and RECOMMENDED NEXT STEP → nextAction", () => {
+    const r = parseCriticalReview(SAMPLE_CRITICAL_LEGACY);
+    expect(r.parsed).toBe(true);
+    expect(r.verdict).toBe("Proceed with caution");
+    expect(r.why).toEqual(["old finding 1", "old finding 2"]);
+    expect(r.nextAction).toContain("retry counter");
+  });
+
+  it("maps NEXT PROMPT FOR CLAUDE CODE → nextPrompt", () => {
+    const r = parseCriticalReview(SAMPLE_CRITICAL_LEGACY);
+    expect(r.nextPrompt).toContain("retry counter, capped at 5");
+  });
+
+  it("falls back to MAIN RISK when no NEXT ACTION / RECOMMENDED NEXT STEP", () => {
+    const text = `VERDICT:\nLooks fine.\n\nMAIN RISK:\nA race.\n`;
+    const r = parseCriticalReview(text);
+    expect(r.nextAction).toBe("A race.");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// parseCoachReview (unchanged — coach format kept the same)
 // ---------------------------------------------------------------------------
 
 describe("parseCoachReview", () => {
@@ -257,24 +280,7 @@ describe("stripFences", () => {
   });
 
   it("only strips when the WHOLE body is a single fence", () => {
-    // Half-fenced text shouldn't be mangled.
     const partial = "```\nhello\nworld";
     expect(stripFences(partial)).toBe(partial);
-  });
-});
-
-describe("classifyVerdict", () => {
-  it("returns null on null / empty", () => {
-    expect(classifyVerdict(null)).toBeNull();
-    expect(classifyVerdict("")).toBeNull();
-  });
-
-  it("ignores case and surrounding whitespace", () => {
-    expect(classifyVerdict("  good to proceed  ")).toBe("good");
-    expect(classifyVerdict("PROCEED WITH CAUTION")).toBe("caution");
-  });
-
-  it("returns null for unrecognized phrases", () => {
-    expect(classifyVerdict("looking nice")).toBeNull();
   });
 });
