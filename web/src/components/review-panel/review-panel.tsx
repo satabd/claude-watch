@@ -3,11 +3,13 @@ import {
   AlertCircle,
   AlertTriangle,
   CheckCircle2,
+  Check,
   ChevronDown,
   ChevronRight,
   ClipboardCheck,
   Copy,
   Eye,
+  History,
   Loader2,
   MessageSquare,
   OctagonAlert,
@@ -19,6 +21,11 @@ import {
 import { Sheet, SheetContent } from "@/components/ui/sheet";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from "@/components/ui/popover";
 import { useApp } from "@/store/app";
 import {
   api,
@@ -365,12 +372,12 @@ export function ReviewPanel() {
     <Sheet open={open} onOpenChange={(o) => (o ? null : close())}>
       <SheetContent
         side="right"
-        className="flex h-full flex-col p-0 sm:max-w-[820px]"
+        className="flex h-full flex-col p-0 sm:max-w-[720px]"
       >
         <header className="flex shrink-0 items-center gap-2 border-b border-border px-4 py-3">
           <ClipboardCheck className="h-4 w-4 text-primary" />
           <div className="flex-1 min-w-0">
-            <div className="text-sm font-semibold">Review Threads</div>
+            <div className="text-sm font-semibold">Review current work</div>
             <div className="truncate text-[11px] text-muted-foreground">
               {projectCwd ?? "No project selected"}
               {panel.sourceTurnUuid && (
@@ -380,60 +387,62 @@ export function ReviewPanel() {
               )}
             </div>
           </div>
-          <Badge variant="muted">codex</Badge>
-        </header>
-
-        <div className="flex-1 min-h-0 overflow-hidden grid grid-cols-[220px_1fr]">
-          <ThreadList
+          <HistoryPopover
             threads={threads}
             activeId={panel.threadId}
             onSelect={(id) => setField("threadId", id)}
             onCreate={onCreateThread}
             creating={creatingThread}
-            setupState={setupState}
-            setupError={setupError}
-            onRetrySetup={() =>
-              ensureThread(panel.sourceTurnUuid, panel.sourceTurnText)
-            }
+          />
+          <Badge variant="muted">codex</Badge>
+        </header>
+
+        <SetupBanner
+          state={setupState}
+          error={setupError}
+          onRetry={() =>
+            ensureThread(panel.sourceTurnUuid, panel.sourceTurnText)
+          }
+        />
+
+        {/* Single-focus body: full panel width, no permanent sidebar.
+            History lives in the header popover above. */}
+        <div className="flex min-w-0 flex-1 flex-col overflow-y-auto scrollbar-thin">
+          <ReviewerModeRow
+            mode={panel.reviewerMode}
+            onChange={(m) => setField("reviewerMode", m)}
           />
 
-          <div className="flex min-w-0 flex-col overflow-y-auto scrollbar-thin">
-            <ReviewerModeRow
-              mode={panel.reviewerMode}
-              onChange={(m) => setField("reviewerMode", m)}
+          <EvidencePanel
+            evidence={panel.evidence}
+            onToggle={setEvidence}
+            hasClaudeTurn={!!panel.sourceTurnText}
+            git={preview?.git}
+            testOutput={panel.testOutput}
+            buildOutput={panel.buildOutput}
+            onChangeTest={(v) => setField("testOutput", v)}
+            onChangeBuild={(v) => setField("buildOutput", v)}
+          />
+
+          <PacketSizeRow preview={preview} previewing={previewing} />
+
+          {preview?.secret_hits?.length ? (
+            <SecretWarning
+              hits={preview.secret_hits}
+              override={secretOverride}
+              onToggleOverride={() => setSecretOverride((v) => !v)}
             />
+          ) : null}
 
-            <EvidencePanel
-              evidence={panel.evidence}
-              onToggle={setEvidence}
-              hasClaudeTurn={!!panel.sourceTurnText}
-              git={preview?.git}
-              testOutput={panel.testOutput}
-              buildOutput={panel.buildOutput}
-              onChangeTest={(v) => setField("testOutput", v)}
-              onChangeBuild={(v) => setField("buildOutput", v)}
-            />
+          <QuestionRow
+            question={panel.question}
+            onChange={(v) => setField("question", v)}
+            onSend={onSend}
+            sending={sending}
+            disabled={!activeThread}
+          />
 
-            <PacketSizeRow preview={preview} previewing={previewing} />
-
-            {preview?.secret_hits?.length ? (
-              <SecretWarning
-                hits={preview.secret_hits}
-                override={secretOverride}
-                onToggleOverride={() => setSecretOverride((v) => !v)}
-              />
-            ) : null}
-
-            <QuestionRow
-              question={panel.question}
-              onChange={(v) => setField("question", v)}
-              onSend={onSend}
-              sending={sending}
-              disabled={!activeThread}
-            />
-
-            <MessagesList messages={messages} onCopyPrompt={onCopyPrompt} />
-          </div>
+          <MessagesList messages={messages} onCopyPrompt={onCopyPrompt} />
         </div>
       </SheetContent>
     </Sheet>
@@ -442,92 +451,144 @@ export function ReviewPanel() {
 
 // -- subcomponents --
 
-function ThreadList({
+/** Thin status banner shown above the main content while auto-setup is
+ *  running, or when it fails. Replaces the sidebar's previous loading /
+ *  error UI now that the sidebar is gone. */
+function SetupBanner({
+  state,
+  error,
+  onRetry,
+}: {
+  state: SetupState;
+  error: string | null;
+  onRetry: () => void;
+}) {
+  if (state === "loading") {
+    return (
+      <div className="flex items-center gap-2 border-b border-border bg-muted/30 px-4 py-1.5 text-[11px] text-muted-foreground">
+        <Loader2 className="h-3 w-3 animate-spin" />
+        Preparing review thread…
+      </div>
+    );
+  }
+  if (state === "error") {
+    return (
+      <div className="flex items-start gap-2 border-b border-destructive/40 bg-destructive/10 px-4 py-2 text-[11.5px] text-destructive">
+        <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+        <div className="min-w-0 flex-1">
+          <div className="font-medium">Couldn't prepare a review thread</div>
+          <div className="mt-0.5 break-words text-[10.5px] opacity-90">
+            {error ?? "Unknown error"}
+          </div>
+        </div>
+        <Button size="sm" variant="outline" className="h-6" onClick={onRetry}>
+          Retry
+        </Button>
+      </div>
+    );
+  }
+  return null;
+}
+
+/** Header-anchored popover that hosts the previous-reviews list and the
+ *  manual "New thread" action. Hidden behind a small "History" button so
+ *  the default workflow stays single-focus on the current review. */
+function HistoryPopover({
   threads,
   activeId,
   onSelect,
   onCreate,
   creating,
-  setupState,
-  setupError,
-  onRetrySetup,
 }: {
   threads: ReviewThread[];
   activeId: number | null;
   onSelect: (id: number) => void;
   onCreate: () => void;
   creating: boolean;
-  setupState: SetupState;
-  setupError: string | null;
-  onRetrySetup: () => void;
 }) {
+  const [open, setOpen] = React.useState(false);
   return (
-    <aside className="flex flex-col border-e border-border bg-card/40">
-      <div className="flex items-center justify-between gap-2 px-3 py-2 text-[11px] uppercase tracking-wider text-muted-foreground">
-        <span>Threads</span>
+    <Popover open={open} onOpenChange={setOpen}>
+      <PopoverTrigger asChild>
         <Button
+          variant="ghost"
           size="sm"
-          variant="outline"
-          className="h-6"
-          onClick={onCreate}
-          disabled={creating || setupState === "loading"}
-          title="Start an additional separate review thread"
+          className="h-7 gap-1.5"
+          title="Previous reviews"
         >
-          {creating ? (
-            <Loader2 className="h-3 w-3 animate-spin" />
-          ) : (
-            <Plus className="h-3 w-3" />
-          )}
-          New
-        </Button>
-      </div>
-      <div className="flex-1 overflow-y-auto scrollbar-thin">
-        {setupState === "loading" && threads.length === 0 && (
-          <div className="flex items-center gap-2 px-3 py-2 text-[11px] text-muted-foreground">
-            <Loader2 className="h-3 w-3 animate-spin" />
-            Preparing review thread…
-          </div>
-        )}
-        {setupState === "error" && (
-          <div className="m-2 rounded-md border border-destructive/40 bg-destructive/10 p-2 text-[11px] text-destructive">
-            <div className="mb-1 flex items-center gap-1.5 font-medium">
-              <AlertCircle className="h-3 w-3" />
-              Couldn't prepare a review thread
-            </div>
-            <div className="mb-2 break-words text-[10.5px] opacity-90">
-              {setupError ?? "Unknown error"}
-            </div>
-            <Button
-              size="sm"
-              variant="outline"
-              className="h-6"
-              onClick={onRetrySetup}
-            >
-              Retry
-            </Button>
-          </div>
-        )}
-        {threads.map((t) => (
-          <button
-            key={t.id}
-            onClick={() => onSelect(t.id)}
-            className={cn(
-              "flex w-full flex-col gap-0.5 rounded px-3 py-2 text-left text-[12px] transition-colors hover:bg-accent/50",
-              activeId === t.id && "bg-accent text-foreground",
-            )}
-            title={t.name}
-          >
-            <span className="truncate font-medium">{t.name}</span>
-            <span className="text-[10px] text-muted-foreground">
-              {formatRelative(t.updated_at)}
-              {t.provider_session_id && (
-                <span className="ms-1 font-mono opacity-60">· resume</span>
-              )}
+          <History className="h-3.5 w-3.5" />
+          History
+          {threads.length > 0 && (
+            <span className="rounded bg-muted/70 px-1.5 font-mono text-[10px] text-muted-foreground">
+              {threads.length}
             </span>
-          </button>
-        ))}
-      </div>
-    </aside>
+          )}
+        </Button>
+      </PopoverTrigger>
+      <PopoverContent align="end" className="w-80 p-0">
+        <div className="flex items-center justify-between border-b border-border px-3 py-2 text-[11px] uppercase tracking-wider text-muted-foreground">
+          <span>Previous reviews</span>
+          <Button
+            size="sm"
+            variant="outline"
+            className="h-6"
+            onClick={() => {
+              onCreate();
+              setOpen(false);
+            }}
+            disabled={creating}
+            title="Start an additional separate review thread"
+          >
+            {creating ? (
+              <Loader2 className="h-3 w-3 animate-spin" />
+            ) : (
+              <Plus className="h-3 w-3" />
+            )}
+            New thread
+          </Button>
+        </div>
+        <div className="max-h-[360px] overflow-y-auto scrollbar-thin">
+          {threads.length === 0 && (
+            <div className="px-3 py-3 text-[11.5px] text-muted-foreground">
+              No previous reviews yet.
+            </div>
+          )}
+          {threads.map((t) => (
+            <button
+              key={t.id}
+              onClick={() => {
+                onSelect(t.id);
+                setOpen(false);
+              }}
+              className={cn(
+                "flex w-full items-start gap-2 px-3 py-2 text-left text-[12px] transition-colors hover:bg-accent/50",
+                activeId === t.id && "bg-accent/70",
+              )}
+              title={t.name}
+            >
+              <span
+                className={cn(
+                  "mt-0.5 inline-flex h-3.5 w-3.5 shrink-0 items-center justify-center",
+                  activeId === t.id ? "text-primary" : "opacity-0",
+                )}
+                aria-hidden={activeId !== t.id}
+              >
+                <Check className="h-3 w-3" />
+              </span>
+              <span className="min-w-0 flex-1">
+                <span className="block truncate font-medium">{t.name}</span>
+                <span className="text-[10px] text-muted-foreground">
+                  {formatRelative(t.updated_at)}
+                  {t.provider_session_id && (
+                    <span className="ms-1 font-mono opacity-60">· resume</span>
+                  )}
+                </span>
+              </span>
+            </button>
+          ))}
+        </div>
+      </PopoverContent>
+    </Popover>
   );
 }
 
