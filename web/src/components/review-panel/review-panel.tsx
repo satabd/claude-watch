@@ -26,6 +26,7 @@ import {
 import { cn, formatRelative } from "@/lib/utils";
 import { sessionDisplayName } from "@/lib/session-display";
 import { copyTargetForReply } from "@/lib/extract-next-prompt";
+import { effectiveQuestion } from "./effective-question";
 import { toast } from "sonner";
 
 const REVIEWER_MODES: { id: ReviewerMode; label: string; hint: string }[] = [
@@ -51,6 +52,7 @@ const EVIDENCE_LABELS: { key: keyof ReviewEvidenceFlags; label: string }[] = [
 ];
 
 const PREVIEW_DEBOUNCE_MS = 350;
+
 
 /** Build the default thread name for an auto-create. The spec wants two
  *  shapes: "Review: <first 60 chars of result>" when anchored to a turn,
@@ -184,10 +186,13 @@ export function ReviewPanel() {
       .catch((e) => toast.error(e?.message ?? "Failed to load messages"));
   }, [panel.threadId]);
 
-  // Build the preview request from current store state.
+  // Build the preview request from current store state. We send the
+  // *effective* question (default-when-blank) so the size / token estimate
+  // already reflects what /send would actually transmit. No API call ever
+  // sees question="" from this component.
   const previewRequest = React.useMemo(
     () => ({
-      question: panel.question,
+      question: effectiveQuestion(panel.question),
       reviewer_mode: panel.reviewerMode,
       project_bucket: projectBucket,
       project_cwd: projectCwd,
@@ -215,12 +220,11 @@ export function ReviewPanel() {
   );
 
   // Debounced preview refresh — fires whenever evidence / question changes.
+  // Always issues the request even when the user hasn't typed yet, because
+  // previewRequest already substitutes DEFAULT_QUESTION; the size estimate
+  // therefore reflects what would actually be sent on click.
   React.useEffect(() => {
     if (!open) return;
-    if (!panel.question.trim() && !panel.sourceTurnText) {
-      setPreview(null);
-      return;
-    }
     let cancelled = false;
     setPreviewing(true);
     const handle = window.setTimeout(async () => {
@@ -237,7 +241,7 @@ export function ReviewPanel() {
       cancelled = true;
       window.clearTimeout(handle);
     };
-  }, [open, previewRequest, panel.question, panel.sourceTurnText]);
+  }, [open, previewRequest]);
 
   /** "New thread" button — explicit user action to start a SEPARATE thread
    *  alongside whatever auto-setup picked. We disambiguate the name with a
@@ -276,16 +280,16 @@ export function ReviewPanel() {
       toast.error("Create or select a thread first");
       return;
     }
-    if (!panel.question.trim()) {
-      toast.error("Type a question for the reviewer");
-      return;
-    }
     if (preview?.secret_hits?.length && !secretOverride) {
       toast.error(
         "Secret-like values detected. Toggle override or remove the offending evidence.",
       );
       return;
     }
+    // Empty / whitespace-only questions are silently substituted with
+    // DEFAULT_QUESTION via effectiveQuestion() inside previewRequest.
+    // The frontend never calls /send with question="" so the backend's
+    // pydantic min_length=1 validator never trips for that reason.
     setSending(true);
     try {
       const reply = await api.reviewsSend({
@@ -310,6 +314,13 @@ export function ReviewPanel() {
       if (msg.includes("SECRET_DETECTED") || msg.startsWith("409")) {
         toast.error(
           "Secret-like values detected. Toggle override or remove the offending evidence.",
+        );
+      } else if (msg.startsWith("422")) {
+        // Backend pydantic validation rejected something. Replace the raw
+        // JSON-shaped error with a friendly hint. The default-question
+        // substitution should keep us out of this branch in practice.
+        toast.error(
+          "The reviewer couldn't validate the request. Try rephrasing your question or simplifying the evidence and retry.",
         );
       } else {
         toast.error(msg || "Send failed");
@@ -711,14 +722,18 @@ function QuestionRow({
   sending: boolean;
   disabled: boolean;
 }) {
+  const willUseDefault = !question.trim();
   return (
     <div className="border-b border-border px-4 py-3">
-      <div className="mb-1.5 text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
-        Your question
+      <div className="mb-1.5 flex items-center justify-between text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
+        <span>Your question</span>
+        <span className="font-normal normal-case text-muted-foreground/70">
+          optional
+        </span>
       </div>
       <textarea
         value={question}
-        placeholder="What do you want the reviewer to look at?"
+        placeholder="Optional: tell the reviewer what to focus on. Leave blank for a general review."
         onChange={(e) => onChange(e.target.value)}
         onKeyDown={(e) => {
           if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
@@ -733,10 +748,12 @@ function QuestionRow({
           onClick={onSend}
           size="sm"
           className="h-7"
-          disabled={sending || disabled || !question.trim()}
+          disabled={sending || disabled}
           title={
             disabled
               ? "Create or select a thread first"
+              : willUseDefault
+              ? "Send a general review (Cmd-Enter)"
               : "Send to reviewer (Cmd-Enter)"
           }
         >
@@ -745,8 +762,17 @@ function QuestionRow({
           ) : (
             <Send className="h-3 w-3" />
           )}
-          {sending ? "Sending…" : "Send to reviewer"}
+          {sending
+            ? "Sending…"
+            : willUseDefault
+            ? "Send (general review)"
+            : "Send to reviewer"}
         </Button>
+        {willUseDefault && !disabled && (
+          <span className="text-[10.5px] text-muted-foreground/80">
+            Will use a default review prompt.
+          </span>
+        )}
         <span className="ms-auto text-[10px] text-muted-foreground">
           ⌘ + Enter
         </span>
