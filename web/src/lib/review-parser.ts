@@ -51,11 +51,14 @@ export interface CoachReview {
 
 const KNOWN_HEADINGS = [
   "VERDICT",
-  "WHY",
+  "WHAT MATTERS",
   "NEXT ACTION",
   "PROMPT TO SEND CLAUDE",
+  "OPTIONAL NOTES",
+  // Aliases / back-compat labels — still parsed so older messages render
+  // correctly under the new shape.
+  "WHY",
   "DETAILS",
-  // Legacy critical-reviewer labels — still parsed for back-compat.
   "KEY FINDINGS",
   "MAIN RISK",
   "RECOMMENDED NEXT STEP",
@@ -184,7 +187,11 @@ export function parseCriticalReview(text: string): CriticalReview {
   // verdict as missing.
   const verdict = verdictBody && verdictBody.length > 0 ? verdictBody : null;
 
-  const whyBody = sections.get("WHY") ?? sections.get("KEY FINDINGS") ?? "";
+  const whyBody =
+    sections.get("WHAT MATTERS") ??
+    sections.get("WHY") ??
+    sections.get("KEY FINDINGS") ??
+    "";
   const why = parseBullets(whyBody, 5);
 
   // NEXT ACTION (current) or RECOMMENDED NEXT STEP (legacy). MAIN RISK is
@@ -207,7 +214,12 @@ export function parseCriticalReview(text: string): CriticalReview {
   const nextPrompt =
     rawNextPrompt && rawNextPrompt.trim() ? stripFences(rawNextPrompt) : null;
 
-  const details = sections.get("DETAILS")?.trim() || null;
+  // OPTIONAL NOTES is the new label for "extra context the user might
+  // want"; the old DETAILS label is still recognized for back-compat.
+  const details =
+    sections.get("OPTIONAL NOTES")?.trim() ||
+    sections.get("DETAILS")?.trim() ||
+    null;
 
   const parsed = !!(
     verdict ||

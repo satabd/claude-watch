@@ -6,6 +6,7 @@ import {
   Loader2,
   User,
   Bot,
+  Copy,
   ExternalLink,
   Wand2,
   ClipboardCheck,
@@ -210,6 +211,85 @@ function TurnBody({ text, uuid, role }: { text: string; uuid: string; role: stri
           <ReactMarkdown remarkPlugins={[remarkGfm]}>{text}</ReactMarkdown>
         </div>
       )}
+      {role === "assistant" && (
+        <AssistantActionRow uuid={uuid} role={role} text={text} />
+      )}
+    </div>
+  );
+}
+
+/** Always-visible action row anchored to an assistant message. The Review
+ *  button captures THIS exact message as the review subject — the panel's
+ *  source_turn_uuid is set to ``uuid`` and the subject card shows
+ *  ``text``. No reviewer call is fired by clicking Review; the user must
+ *  press Send (or enable Auto Review and Send) inside the panel. */
+function AssistantActionRow({
+  uuid,
+  role,
+  text,
+}: {
+  uuid: string;
+  role: string | null;
+  text: string;
+}) {
+  const openPromptWriter = useApp((s) => s.openPromptWriter);
+  const openReviewPanel = useApp((s) => s.openReviewPanel);
+
+  const onReview = () => {
+    openReviewPanel({
+      sourceTurnUuid: uuid,
+      sourceTurnRole: role,
+      sourceTurnText: text,
+    });
+  };
+
+  const onWritePrompt = () => {
+    openPromptWriter({
+      sourceEventUuid: uuid,
+      selectedText: null,
+      contextMode: "selected_plus_nearby",
+    });
+  };
+
+  const onCopy = async () => {
+    if (!text || !text.trim()) return;
+    try {
+      await navigator.clipboard.writeText(text);
+      toast.success("Copied message");
+    } catch {
+      toast.error("Clipboard write failed");
+    }
+  };
+
+  return (
+    <div className="mt-2 flex flex-wrap items-center gap-1.5 text-[11px] text-muted-foreground">
+      <button
+        type="button"
+        onClick={onReview}
+        className="inline-flex items-center gap-1 rounded-md border border-border bg-background/40 px-2 py-0.5 transition-colors hover:border-primary/50 hover:bg-primary/5 hover:text-foreground"
+        title="Open Review Chat anchored to this exact Claude message"
+      >
+        <ClipboardCheck className="h-3 w-3" />
+        Review this
+      </button>
+      <button
+        type="button"
+        onClick={onWritePrompt}
+        className="inline-flex items-center gap-1 rounded-md border border-border bg-background/40 px-2 py-0.5 transition-colors hover:bg-accent/40 hover:text-foreground"
+        title="Open the Prompt Writer with this turn as the source"
+      >
+        <Wand2 className="h-3 w-3" />
+        Write prompt from this
+      </button>
+      <button
+        type="button"
+        onClick={onCopy}
+        className="inline-flex items-center gap-1 rounded-md border border-border bg-background/40 px-2 py-0.5 transition-colors hover:bg-accent/40 hover:text-foreground"
+        title="Copy this message text to the clipboard"
+      >
+        <Copy className="h-3 w-3" />
+        Copy
+      </button>
     </div>
   );
 }

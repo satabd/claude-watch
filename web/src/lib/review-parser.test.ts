@@ -161,6 +161,67 @@ do the thing.
 // parseCriticalReview — legacy back-compat
 // ---------------------------------------------------------------------------
 
+describe("parseCriticalReview (chat format with WHAT MATTERS / OPTIONAL NOTES)", () => {
+  it("recognizes WHAT MATTERS as the bullets section", () => {
+    const text = `VERDICT:
+Looks safe.
+
+WHAT MATTERS:
+- the migration is reversible
+- the diff is small
+
+NEXT ACTION:
+Ship it.
+
+PROMPT TO SEND CLAUDE:
+Add a smoke test that exercises the rollback path.
+`;
+    const r = parseCriticalReview(text);
+    expect(r.parsed).toBe(true);
+    expect(r.why).toEqual([
+      "the migration is reversible",
+      "the diff is small",
+    ]);
+    expect(r.nextAction).toBe("Ship it.");
+    expect(r.nextPrompt).toContain("smoke test");
+  });
+
+  it("recognizes OPTIONAL NOTES as the details section", () => {
+    const text = `VERDICT:\nFine.\n\nOPTIONAL NOTES:\nWatch the timeout config under heavy load.\n`;
+    const r = parseCriticalReview(text);
+    expect(r.details).toContain("Watch the timeout");
+  });
+
+  it("preserves Markdown structure inside the prompt section", () => {
+    const text = `VERDICT:
+Needs structure.
+
+PROMPT TO SEND CLAUDE:
+Refactor the auth flow as follows:
+
+1. Add a \`requireAuth\` middleware in src/auth.ts.
+2. Update routes:
+   - GET /api/users
+   - POST /api/sessions
+
+\`\`\`ts
+export const requireAuth = (req, res, next) => { /* … */ };
+\`\`\`
+
+Make sure existing tests still pass.
+`;
+    const r = parseCriticalReview(text);
+    expect(r.nextPrompt).toBeTruthy();
+    // The parser should NOT collapse line breaks or strip inner markdown.
+    expect(r.nextPrompt).toContain("1. Add a `requireAuth`");
+    expect(r.nextPrompt).toContain("- GET /api/users");
+    expect(r.nextPrompt).toContain("```ts");
+    expect(r.nextPrompt).toContain("```");
+    // Newlines are preserved.
+    expect(r.nextPrompt!.split("\n").length).toBeGreaterThan(5);
+  });
+});
+
 describe("parseCriticalReview (legacy format back-compat)", () => {
   it("maps KEY FINDINGS → why and RECOMMENDED NEXT STEP → nextAction", () => {
     const r = parseCriticalReview(SAMPLE_CRITICAL_LEGACY);

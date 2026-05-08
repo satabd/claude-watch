@@ -1,10 +1,13 @@
 import * as React from "react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import {
   AlertCircle,
   Check,
   ChevronDown,
   ChevronRight,
   ClipboardCheck,
+  Clock,
   Copy,
   History,
   Loader2,
@@ -125,8 +128,46 @@ export function ReviewPanel() {
   // Subject card (Claude result preview at the top) and the Evidence
   // section default to collapsed — chat composer is the visual focus.
   const [subjectExpanded, setSubjectExpanded] = React.useState(false);
+  // "Current review only" filtering. We capture the timestamp at which
+  // ensure-thread completed for the current opening; messages older than
+  // that are considered "history" and hidden from the main chat by default.
+  // The user toggles ``showHistory`` to reveal them.
+  const [openedAt, setOpenedAt] = React.useState<number>(() => Date.now());
+  const [showHistory, setShowHistory] = React.useState(false);
 
   const activeThread = threads.find((t) => t.id === panel.threadId) ?? null;
+
+  // "Current review only" filtering: by default the chat shows messages
+  // newer than the panel-open timestamp. Flip showHistory to see older
+  // messages from the same thread.
+  const visibleMessages = React.useMemo(
+    () =>
+      showHistory
+        ? messages
+        : messages.filter((m) => m.created_at >= openedAt),
+    [messages, showHistory, openedAt],
+  );
+  const hiddenHistoryCount = messages.length - visibleMessages.length;
+
+  // Find the most-recent reviewer message in the current view that has a
+  // usable next-prompt. We hoist that prompt into a prominent box below
+  // the chat so the user doesn't have to dig for it inside the message.
+  const latestPrompt = React.useMemo<{ msg: ReviewMessage; prompt: string } | null>(() => {
+    for (let i = visibleMessages.length - 1; i >= 0; i--) {
+      const m = visibleMessages[i];
+      if (m.role !== "reviewer") continue;
+      const mode = reviewerModeFromMessage(m);
+      if (mode === "critical") {
+        const p = parseCriticalReview(m.content);
+        if (p.parsed && p.nextPrompt) return { msg: m, prompt: p.nextPrompt };
+      } else {
+        const p = parseCoachReview(m.content);
+        if (p.parsed && p.improvedPrompt) return { msg: m, prompt: p.improvedPrompt };
+      }
+    }
+    return null;
+  }, [visibleMessages]);
+
   const composerHasText = panel.question.trim().length > 0;
   // Send is enabled iff there's text OR Auto Review is on (an explicit
   // opt-in to send a default review). The thread must also exist; setup
@@ -200,6 +241,11 @@ export function ReviewPanel() {
     }
     if (!setupAttemptedRef.current) {
       setupAttemptedRef.current = true;
+      // Mark the start of THIS opening so older messages from the same
+      // thread are filtered out of the default view. The user can flip
+      // showHistory to see them.
+      setOpenedAt(Date.now());
+      setShowHistory(false);
       ensureThread(panel.sourceTurnUuid, panel.sourceTurnText);
     }
   }, [open, ensureThread, panel.sourceTurnUuid, panel.sourceTurnText]);
@@ -460,7 +506,30 @@ export function ReviewPanel() {
             />
           ) : null}
 
-          <MessagesList messages={messages} onCopyPrompt={onCopyPrompt} />
+          <HistoryToggle
+            hiddenCount={hiddenHistoryCount}
+            showing={showHistory}
+            onToggle={() => setShowHistory((v) => !v)}
+          />
+
+          <MessagesList
+            messages={visibleMessages}
+            hidePromptBoxes
+            onCopyPrompt={onCopyPrompt}
+          />
+
+          {latestPrompt && (
+            <LatestPromptBox
+              prompt={latestPrompt.prompt}
+              modeLabel={
+                reviewerModeFromMessage(latestPrompt.msg) === "prompt_coach"
+                  ? "Improved prompt"
+                  : "Prompt to send Claude Code"
+              }
+              createdAt={latestPrompt.msg.created_at}
+              onCopy={() => onCopyPrompt(latestPrompt.prompt)}
+            />
+          )}
         </div>
 
         {/* Composer pinned at the bottom of the sheet. Stays visible
@@ -1010,17 +1079,21 @@ function PacketSizePill({
 function MessagesList({
   messages,
   onCopyPrompt,
+  hidePromptBoxes,
 }: {
   messages: ReviewMessage[];
-  /** Copies the cleaned prompt string. Caller decides what to copy
-   *  (parsed next-prompt vs. fallback) — this component just hands it
-   *  through to the clipboard. */
+  /** Copies the cleaned prompt string. Caller decides what to copy. */
   onCopyPrompt: (prompt: string) => void;
+  /** When true, the per-message reviewer card omits its own prompt box.
+   *  The panel hoists the latest prompt into a separate prominent
+   *  LatestPromptBox below the message list, so duplicating it inside
+   *  the reviewer card would be noisy. */
+  hidePromptBoxes?: boolean;
 }) {
   if (messages.length === 0) {
     return (
       <div className="flex flex-1 items-center justify-center px-4 py-8 text-[11px] text-muted-foreground">
-        No exchanges yet in this thread.
+        Send a message to start the review.
       </div>
     );
   }
@@ -1032,11 +1105,49 @@ function MessagesList({
             key={m.id}
             msg={m}
             onCopyPrompt={onCopyPrompt}
+            hidePromptBox={hidePromptBoxes}
           />
         ) : (
           <UserMessageView key={m.id} msg={m} />
         ),
       )}
+    </div>
+  );
+}
+
+/** Toggle row for "Show / Hide history" — only renders when there are
+ *  messages older than the panel-open timestamp. Lives between the
+ *  evidence section and the messages list so it's discoverable but not
+ *  noisy. */
+function HistoryToggle({
+  hiddenCount,
+  showing,
+  onToggle,
+}: {
+  hiddenCount: number;
+  showing: boolean;
+  onToggle: () => void;
+}) {
+  // Always render when showing is true (so the user can fold history back
+  // away), or when there are hidden messages to reveal.
+  if (!showing && hiddenCount <= 0) return null;
+  return (
+    <div className="flex items-center justify-between border-b border-dashed border-border bg-muted/20 px-4 py-1.5 text-[11px] text-muted-foreground">
+      <span className="flex items-center gap-1.5">
+        <Clock className="h-3 w-3" />
+        {showing
+          ? "Showing full review history"
+          : hiddenCount === 1
+          ? "1 earlier message hidden"
+          : `${hiddenCount} earlier messages hidden`}
+      </span>
+      <button
+        type="button"
+        onClick={onToggle}
+        className="font-medium text-primary underline-offset-2 hover:underline"
+      >
+        {showing ? "Hide history" : "Show history"}
+      </button>
     </div>
   );
 }
@@ -1073,9 +1184,11 @@ function reviewerModeFromMessage(m: ReviewMessage): ReviewerMode {
 function ReviewerMessageView({
   msg,
   onCopyPrompt,
+  hidePromptBox,
 }: {
   msg: ReviewMessage;
   onCopyPrompt: (prompt: string) => void;
+  hidePromptBox?: boolean;
 }) {
   const mode = reviewerModeFromMessage(msg);
   const parsed = React.useMemo(
@@ -1107,12 +1220,14 @@ function ReviewerMessageView({
           parsed={parsed as CriticalReview}
           fullContent={msg.content}
           onCopyPrompt={onCopyPrompt}
+          hidePromptBox={hidePromptBox}
         />
       ) : parsed.parsed && mode === "prompt_coach" ? (
         <CoachReviewView
           parsed={parsed as CoachReview}
           fullContent={msg.content}
           onCopyPrompt={onCopyPrompt}
+          hidePromptBox={hidePromptBox}
         />
       ) : (
         <RawReviewerView msg={msg} onCopyPrompt={onCopyPrompt} />
@@ -1129,10 +1244,14 @@ function CriticalReviewView({
   parsed,
   fullContent,
   onCopyPrompt,
+  hidePromptBox,
 }: {
   parsed: CriticalReview;
   fullContent: string;
   onCopyPrompt: (prompt: string) => void;
+  /** When true, the prompt is rendered separately below the message
+   *  list (LatestPromptBox) so we omit it here to avoid duplication. */
+  hidePromptBox?: boolean;
 }) {
   return (
     <div className="space-y-3 text-[13px] leading-relaxed">
@@ -1160,15 +1279,16 @@ function CriticalReviewView({
         </p>
       )}
 
-      {parsed.nextPrompt ? (
-        <NextPromptBox
-          label="Prompt to send Claude"
-          prompt={parsed.nextPrompt}
-          onCopy={() => onCopyPrompt(parsed.nextPrompt!)}
-        />
-      ) : (
-        <NoPromptHint />
-      )}
+      {!hidePromptBox &&
+        (parsed.nextPrompt ? (
+          <NextPromptBox
+            label="Prompt to send Claude"
+            prompt={parsed.nextPrompt}
+            onCopy={() => onCopyPrompt(parsed.nextPrompt!)}
+          />
+        ) : (
+          <NoPromptHint />
+        ))}
 
       {parsed.details && <CollapsibleDetails text={parsed.details} />}
       <ShowFullReviewToggle content={fullContent} />
@@ -1184,10 +1304,12 @@ function CoachReviewView({
   parsed,
   fullContent,
   onCopyPrompt,
+  hidePromptBox,
 }: {
   parsed: CoachReview;
   fullContent: string;
   onCopyPrompt: (prompt: string) => void;
+  hidePromptBox?: boolean;
 }) {
   return (
     <div className="space-y-3 text-[13px] leading-relaxed">
@@ -1197,15 +1319,16 @@ function CoachReviewView({
         </Section>
       )}
 
-      {parsed.improvedPrompt ? (
-        <NextPromptBox
-          label="Improved prompt"
-          prompt={parsed.improvedPrompt}
-          onCopy={() => onCopyPrompt(parsed.improvedPrompt!)}
-        />
-      ) : (
-        <NoPromptHint />
-      )}
+      {!hidePromptBox &&
+        (parsed.improvedPrompt ? (
+          <NextPromptBox
+            label="Improved prompt"
+            prompt={parsed.improvedPrompt}
+            onCopy={() => onCopyPrompt(parsed.improvedPrompt!)}
+          />
+        ) : (
+          <NoPromptHint />
+        ))}
 
       {parsed.whyThisIsBetter.length > 0 && (
         <Section title="Why this is better">
@@ -1350,9 +1473,132 @@ function NextPromptBox({
           Copy next prompt
         </Button>
       </div>
-      <pre className="whitespace-pre-wrap font-sans text-[12.5px] leading-relaxed text-foreground">
-        {prompt}
-      </pre>
+      <PromptMarkdown text={prompt} />
+    </section>
+  );
+}
+
+/** Renders a Markdown-formatted prompt: bullets, numbered lists, and
+ *  fenced code blocks come through as proper visuals; plain prose stays
+ *  legible. The wrapper class keeps it visually anchored as a "prompt
+ *  block" with light typographic spacing.
+ *
+ *  We DON'T strip outer fences here — the parser already did that via
+ *  ``stripFences`` so the prompt is clean by the time it reaches us. */
+function PromptMarkdown({ text }: { text: string }) {
+  return (
+    <div className="prompt-markdown text-[13px] leading-relaxed text-foreground">
+      <ReactMarkdown
+        remarkPlugins={[remarkGfm]}
+        components={{
+          // Tight spacing — matches the existing chat density.
+          p: ({ children, ...props }) => (
+            <p {...props} className="my-1.5 whitespace-pre-wrap">
+              {children}
+            </p>
+          ),
+          ul: ({ children, ...props }) => (
+            <ul {...props} className="my-1.5 ms-5 list-disc space-y-0.5">
+              {children}
+            </ul>
+          ),
+          ol: ({ children, ...props }) => (
+            <ol {...props} className="my-1.5 ms-5 list-decimal space-y-0.5">
+              {children}
+            </ol>
+          ),
+          li: ({ children, ...props }) => (
+            <li {...props} className="leading-relaxed">
+              {children}
+            </li>
+          ),
+          code: ({ children, ...props }) => {
+            const inline = !(props as any).className?.includes("language-");
+            if (inline) {
+              return (
+                <code
+                  className="rounded bg-muted px-1 py-0.5 font-mono text-[12px]"
+                >
+                  {children}
+                </code>
+              );
+            }
+            return (
+              <code className="font-mono text-[12px]">{children}</code>
+            );
+          },
+          pre: ({ children, ...props }) => (
+            <pre
+              {...props}
+              className="my-2 overflow-x-auto rounded-md bg-muted/60 p-2.5 font-mono text-[12px] leading-relaxed scrollbar-thin"
+            >
+              {children}
+            </pre>
+          ),
+          h1: ({ children, ...props }) => (
+            <h3 {...props} className="mt-2 mb-1 text-[14px] font-semibold">
+              {children}
+            </h3>
+          ),
+          h2: ({ children, ...props }) => (
+            <h4 {...props} className="mt-2 mb-1 text-[13px] font-semibold">
+              {children}
+            </h4>
+          ),
+          h3: ({ children, ...props }) => (
+            <h5 {...props} className="mt-1.5 mb-1 text-[12.5px] font-semibold">
+              {children}
+            </h5>
+          ),
+        }}
+      >
+        {text}
+      </ReactMarkdown>
+    </div>
+  );
+}
+
+/** Hoisted "first-class" prompt box rendered below the message list and
+ *  above the composer. Pulls the latest reviewer's parsed nextPrompt
+ *  (Critical) or improvedPrompt (Coach) so the user always sees the
+ *  copy-ready prompt without scrolling into a reviewer card. */
+function LatestPromptBox({
+  prompt,
+  modeLabel,
+  createdAt,
+  onCopy,
+}: {
+  prompt: string;
+  modeLabel: string;
+  createdAt: number;
+  onCopy: () => void;
+}) {
+  return (
+    <section className="mx-4 mb-3 rounded-lg border-2 border-primary/50 bg-background shadow-sm">
+      <header className="flex items-center justify-between gap-2 border-b border-primary/20 bg-primary/5 px-3 py-2">
+        <h3 className="flex items-center gap-1.5 text-[11.5px] font-semibold uppercase tracking-wider text-primary">
+          <Sparkles className="h-3.5 w-3.5" />
+          {modeLabel}
+        </h3>
+        <div className="flex items-center gap-2">
+          <span className="text-[10px] text-muted-foreground">
+            {formatRelative(createdAt)}
+          </span>
+          <Button
+            size="sm"
+            variant="outline"
+            className="h-7"
+            onClick={onCopy}
+            title="Copy this prompt to the clipboard (no fences, no preamble)"
+          >
+            <Copy className="h-3 w-3" />
+            Copy prompt
+          </Button>
+        </div>
+      </header>
+      <div className="px-3 py-2.5">
+        <PromptMarkdown text={prompt} />
+      </div>
     </section>
   );
 }
