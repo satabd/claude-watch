@@ -1,14 +1,20 @@
 import * as React from "react";
 import {
   AlertCircle,
+  AlertTriangle,
+  CheckCircle2,
+  ChevronDown,
+  ChevronRight,
   ClipboardCheck,
   Copy,
   Eye,
   Loader2,
   MessageSquare,
+  OctagonAlert,
   Plus,
   Send,
   ShieldAlert,
+  ShieldCheck,
 } from "lucide-react";
 import { Sheet, SheetContent } from "@/components/ui/sheet";
 import { Button } from "@/components/ui/button";
@@ -26,6 +32,14 @@ import {
 import { cn, formatRelative } from "@/lib/utils";
 import { sessionDisplayName } from "@/lib/session-display";
 import { copyTargetForReply } from "@/lib/extract-next-prompt";
+import {
+  parseCoachReview,
+  parseCriticalReview,
+  VERDICT_DISPLAY,
+  type CoachReview,
+  type CriticalReview,
+  type Verdict,
+} from "@/lib/review-parser";
 import { effectiveQuestion } from "./effective-question";
 import { toast } from "sonner";
 
@@ -330,9 +344,17 @@ export function ReviewPanel() {
     }
   };
 
-  const onCopyNextPrompt = async (reply: string) => {
+  /** Copies the *already-cleaned* prompt string. The caller (the
+   *  individual reviewer-message view) decides what to copy: the parsed
+   *  next-prompt section when the structured parser succeeded, or a
+   *  best-effort fallback otherwise. We never copy the full review. */
+  const onCopyPrompt = async (prompt: string) => {
+    if (!prompt || !prompt.trim()) {
+      toast.error("Nothing to copy yet");
+      return;
+    }
     try {
-      await navigator.clipboard.writeText(copyTargetForReply(reply));
+      await navigator.clipboard.writeText(prompt.trim());
       toast.success("Copied next prompt");
     } catch {
       toast.error("Clipboard write failed");
@@ -410,10 +432,7 @@ export function ReviewPanel() {
               disabled={!activeThread}
             />
 
-            <MessagesList
-              messages={messages}
-              onCopyNextPrompt={onCopyNextPrompt}
-            />
+            <MessagesList messages={messages} onCopyPrompt={onCopyPrompt} />
           </div>
         </div>
       </SheetContent>
@@ -565,72 +584,100 @@ function EvidencePanel({
   onChangeTest: (v: string) => void;
   onChangeBuild: (v: string) => void;
 }) {
+  // Default-collapsed: the question + reviewer reply should be the
+  // visual focus. The user can expand evidence when they want to
+  // change defaults; once expanded, it stays so for the session.
+  const [open, setOpen] = React.useState(false);
+  // Summarize what's enabled so the collapsed header still tells the
+  // user what they're about to send.
+  const enabled = (Object.keys(evidence) as (keyof ReviewEvidenceFlags)[]).filter(
+    (k) => evidence[k],
+  );
   return (
-    <div className="border-b border-border px-4 py-3">
-      <div className="mb-1.5 flex items-center gap-2 text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
-        <Eye className="h-3 w-3" /> Evidence
-      </div>
-      <div className="grid grid-cols-2 gap-1.5">
-        {EVIDENCE_LABELS.map((e) => {
-          const disabled =
-            (e.key === "include_claude_turn" && !hasClaudeTurn) ||
-            (e.key === "include_git_status" && !git?.is_repo) ||
-            (e.key === "include_git_diff" && !git?.is_repo) ||
-            (e.key === "include_changed_files" &&
-              (!git?.is_repo || git.dirty_count === 0));
-          return (
-            <label
-              key={e.key}
-              className={cn(
-                "flex items-center gap-2 rounded border border-border bg-background/40 px-2 py-1 text-[12px]",
-                disabled && "opacity-50",
-              )}
-            >
-              <input
-                type="checkbox"
-                checked={evidence[e.key]}
-                disabled={disabled}
-                onChange={(ev) => onToggle(e.key, ev.target.checked)}
-                className="h-3 w-3"
-              />
-              <span className="flex-1">{e.label}</span>
-              {e.key === "include_git_diff" && git?.diff_truncated && (
-                <Badge variant="warning">trimmed</Badge>
-              )}
-              {e.key === "include_git_status" && git?.is_repo && git.branch && (
-                <span className="font-mono text-[10px] text-muted-foreground">
-                  {git.branch}
-                </span>
-              )}
-              {e.key === "include_changed_files" && git?.is_repo && (
-                <span className="text-[10px] text-muted-foreground">
-                  {git.dirty_count}
-                </span>
-              )}
-            </label>
-          );
-        })}
-      </div>
+    <div className="border-b border-border px-4 py-2.5">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className="flex w-full items-center gap-2 text-[11px] font-medium uppercase tracking-wider text-muted-foreground transition-colors hover:text-foreground"
+      >
+        {open ? (
+          <ChevronDown className="h-3 w-3" />
+        ) : (
+          <ChevronRight className="h-3 w-3" />
+        )}
+        <Eye className="h-3 w-3" />
+        <span>Evidence</span>
+        <span className="font-mono text-[10px] normal-case text-muted-foreground/70">
+          {enabled.length}/{EVIDENCE_LABELS.length} on
+        </span>
+      </button>
 
-      <details className="mt-2">
-        <summary className="cursor-pointer text-[11px] text-muted-foreground hover:text-foreground">
-          Paste test / build output (optional)
-        </summary>
-        <div className="mt-2 space-y-2">
-          <textarea
-            value={testOutput}
-            placeholder="Paste latest test output…"
-            onChange={(e) => onChangeTest(e.target.value)}
-            className="block w-full resize-y rounded-md border border-border bg-background px-2 py-1 text-[12px] outline-none placeholder:text-muted-foreground/60 focus:border-primary/60 min-h-[60px]"
-          />
-          <textarea
-            value={buildOutput}
-            placeholder="Paste latest build output…"
-            onChange={(e) => onChangeBuild(e.target.value)}
-            className="block w-full resize-y rounded-md border border-border bg-background px-2 py-1 text-[12px] outline-none placeholder:text-muted-foreground/60 focus:border-primary/60 min-h-[60px]"
-          />
-        </div>
-      </details>
+      {open && (
+        <>
+          <div className="mt-2 grid grid-cols-2 gap-1.5">
+            {EVIDENCE_LABELS.map((e) => {
+              const disabled =
+                (e.key === "include_claude_turn" && !hasClaudeTurn) ||
+                (e.key === "include_git_status" && !git?.is_repo) ||
+                (e.key === "include_git_diff" && !git?.is_repo) ||
+                (e.key === "include_changed_files" &&
+                  (!git?.is_repo || git.dirty_count === 0));
+              return (
+                <label
+                  key={e.key}
+                  className={cn(
+                    "flex items-center gap-2 rounded border border-border bg-background/40 px-2 py-1 text-[12px]",
+                    disabled && "opacity-50",
+                  )}
+                >
+                  <input
+                    type="checkbox"
+                    checked={evidence[e.key]}
+                    disabled={disabled}
+                    onChange={(ev) => onToggle(e.key, ev.target.checked)}
+                    className="h-3 w-3"
+                  />
+                  <span className="flex-1">{e.label}</span>
+                  {e.key === "include_git_diff" && git?.diff_truncated && (
+                    <Badge variant="warning">trimmed</Badge>
+                  )}
+                  {e.key === "include_git_status" &&
+                    git?.is_repo &&
+                    git.branch && (
+                      <span className="font-mono text-[10px] text-muted-foreground">
+                        {git.branch}
+                      </span>
+                    )}
+                  {e.key === "include_changed_files" && git?.is_repo && (
+                    <span className="text-[10px] text-muted-foreground">
+                      {git.dirty_count}
+                    </span>
+                  )}
+                </label>
+              );
+            })}
+          </div>
+
+          {/* Test / build paste areas appear only when their toggle is on,
+              per spec. The user enables the toggle first, then pastes. */}
+          {evidence.include_test_output && (
+            <textarea
+              value={testOutput}
+              placeholder="Paste latest test output…"
+              onChange={(e) => onChangeTest(e.target.value)}
+              className="mt-2 block w-full resize-y rounded-md border border-border bg-background px-2 py-1 text-[12px] outline-none placeholder:text-muted-foreground/60 focus:border-primary/60 min-h-[60px]"
+            />
+          )}
+          {evidence.include_build_output && (
+            <textarea
+              value={buildOutput}
+              placeholder="Paste latest build output…"
+              onChange={(e) => onChangeBuild(e.target.value)}
+              className="mt-2 block w-full resize-y rounded-md border border-border bg-background px-2 py-1 text-[12px] outline-none placeholder:text-muted-foreground/60 focus:border-primary/60 min-h-[60px]"
+            />
+          )}
+        </>
+      )}
     </div>
   );
 }
@@ -723,9 +770,11 @@ function QuestionRow({
   disabled: boolean;
 }) {
   const willUseDefault = !question.trim();
+  // Visually-elevated card so the question feels like the primary action,
+  // not a peer of the evidence checkboxes above it.
   return (
-    <div className="border-b border-border px-4 py-3">
-      <div className="mb-1.5 flex items-center justify-between text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
+    <div className="border-b border-border bg-primary/5 px-4 py-3.5">
+      <div className="mb-1.5 flex items-center justify-between text-[11px] font-medium uppercase tracking-wider text-primary/80">
         <span>Your question</span>
         <span className="font-normal normal-case text-muted-foreground/70">
           optional
@@ -741,7 +790,7 @@ function QuestionRow({
             onSend();
           }
         }}
-        className="block w-full resize-y rounded-md border border-border bg-background px-3 py-2 text-[13px] outline-none placeholder:text-muted-foreground/60 focus:border-primary/60 min-h-[100px]"
+        className="block w-full resize-y rounded-md border border-primary/30 bg-background px-3 py-2 text-[13px] outline-none placeholder:text-muted-foreground/60 focus:border-primary/60 min-h-[110px]"
       />
       <div className="mt-2 flex items-center gap-2">
         <Button
@@ -783,10 +832,13 @@ function QuestionRow({
 
 function MessagesList({
   messages,
-  onCopyNextPrompt,
+  onCopyPrompt,
 }: {
   messages: ReviewMessage[];
-  onCopyNextPrompt: (reply: string) => void;
+  /** Copies the cleaned prompt string. Caller decides what to copy
+   *  (parsed next-prompt vs. fallback) — this component just hands it
+   *  through to the clipboard. */
+  onCopyPrompt: (prompt: string) => void;
 }) {
   if (messages.length === 0) {
     return (
@@ -797,53 +849,379 @@ function MessagesList({
   }
   return (
     <div className="flex flex-col gap-3 px-4 py-3">
-      {messages.map((m) => (
-        <article
-          key={m.id}
-          className={cn(
-            "rounded-md border p-3 text-[13px] leading-relaxed",
-            m.role === "reviewer"
-              ? "border-primary/30 bg-primary/5"
-              : "border-border bg-background/60",
-          )}
+      {messages.map((m) =>
+        m.role === "reviewer" ? (
+          <ReviewerMessageView
+            key={m.id}
+            msg={m}
+            onCopyPrompt={onCopyPrompt}
+          />
+        ) : (
+          <UserMessageView key={m.id} msg={m} />
+        ),
+      )}
+    </div>
+  );
+}
+
+/** The user's question — kept compact, secondary to the reviewer reply. */
+function UserMessageView({ msg }: { msg: ReviewMessage }) {
+  return (
+    <article className="rounded-md border border-border bg-background/60 p-3 text-[13px] leading-relaxed">
+      <header className="mb-1.5 flex items-center gap-2 text-[10.5px] uppercase tracking-wider text-muted-foreground">
+        <MessageSquare className="h-3 w-3" />
+        <span>you</span>
+        <span className="ms-auto">{formatRelative(msg.created_at)}</span>
+        {msg.estimated_tokens != null && (
+          <span className="font-mono text-[10px]">
+            ~{msg.estimated_tokens} tk
+          </span>
+        )}
+      </header>
+      <pre className="whitespace-pre-wrap font-sans text-[12.5px]">
+        {msg.content}
+      </pre>
+    </article>
+  );
+}
+
+/** Pull the reviewer mode that was used when sending this message, falling
+ *  back to "critical" since that's the V1 default. */
+function reviewerModeFromMessage(m: ReviewMessage): ReviewerMode {
+  const v = (m.context_used_json as { reviewer_mode?: string } | null)
+    ?.reviewer_mode;
+  return v === "prompt_coach" ? "prompt_coach" : "critical";
+}
+
+function ReviewerMessageView({
+  msg,
+  onCopyPrompt,
+}: {
+  msg: ReviewMessage;
+  onCopyPrompt: (prompt: string) => void;
+}) {
+  const mode = reviewerModeFromMessage(msg);
+  const parsed = React.useMemo(
+    () =>
+      mode === "critical"
+        ? parseCriticalReview(msg.content)
+        : parseCoachReview(msg.content),
+    [msg.content, mode],
+  );
+
+  return (
+    <article className="rounded-lg border border-primary/30 bg-primary/5 p-4">
+      <header className="mb-3 flex items-center gap-2 text-[10.5px] uppercase tracking-wider text-muted-foreground">
+        <ShieldCheck className="h-3 w-3 text-primary" />
+        <span>reviewer · {mode === "critical" ? "critical" : "coach"}</span>
+        {msg.model && (
+          <span className="font-mono text-[10px]">{msg.model}</span>
+        )}
+        <span className="ms-auto">{formatRelative(msg.created_at)}</span>
+        {msg.provider_tokens != null && (
+          <span className="font-mono text-[10px]">
+            {msg.provider_tokens} tk
+          </span>
+        )}
+      </header>
+
+      {parsed.parsed && mode === "critical" ? (
+        <CriticalReviewView
+          parsed={parsed as CriticalReview}
+          fullContent={msg.content}
+          onCopyPrompt={onCopyPrompt}
+        />
+      ) : parsed.parsed && mode === "prompt_coach" ? (
+        <CoachReviewView
+          parsed={parsed as CoachReview}
+          fullContent={msg.content}
+          onCopyPrompt={onCopyPrompt}
+        />
+      ) : (
+        <RawReviewerView msg={msg} onCopyPrompt={onCopyPrompt} />
+      )}
+    </article>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Critical Reviewer compact view
+// ---------------------------------------------------------------------------
+
+function CriticalReviewView({
+  parsed,
+  fullContent,
+  onCopyPrompt,
+}: {
+  parsed: CriticalReview;
+  fullContent: string;
+  onCopyPrompt: (prompt: string) => void;
+}) {
+  const promptToCopy = parsed.nextPrompt ?? copyTargetForReply(fullContent);
+  return (
+    <div className="space-y-3 text-[13px] leading-relaxed">
+      <VerdictBadge verdict={parsed.verdict} raw={parsed.verdictRaw} />
+
+      {parsed.keyFindings.length > 0 && (
+        <Section title="Key findings">
+          <ul className="space-y-1">
+            {parsed.keyFindings.slice(0, 3).map((f, i) => (
+              <li key={i} className="flex gap-2">
+                <span className="mt-[6px] h-1 w-1 shrink-0 rounded-full bg-foreground/60" />
+                <span>{f}</span>
+              </li>
+            ))}
+          </ul>
+        </Section>
+      )}
+
+      {parsed.mainRisk && (
+        <Section title="Main risk">
+          <p className="text-foreground/90">{parsed.mainRisk}</p>
+        </Section>
+      )}
+
+      {parsed.recommendedNextStep && (
+        <Section title="Recommended next step">
+          <p className="text-foreground/90">{parsed.recommendedNextStep}</p>
+        </Section>
+      )}
+
+      {parsed.nextPrompt ? (
+        <NextPromptBox
+          label="Next prompt for Claude Code"
+          prompt={parsed.nextPrompt}
+          onCopy={() => onCopyPrompt(promptToCopy)}
+        />
+      ) : (
+        <FallbackCopyRow onCopy={() => onCopyPrompt(promptToCopy)} />
+      )}
+
+      <ShowFullReviewToggle content={fullContent} />
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Prompt Coach compact view
+// ---------------------------------------------------------------------------
+
+function CoachReviewView({
+  parsed,
+  fullContent,
+  onCopyPrompt,
+}: {
+  parsed: CoachReview;
+  fullContent: string;
+  onCopyPrompt: (prompt: string) => void;
+}) {
+  const promptToCopy = parsed.improvedPrompt ?? copyTargetForReply(fullContent);
+  return (
+    <div className="space-y-3 text-[13px] leading-relaxed">
+      {parsed.clarifiedIntent && (
+        <Section title="Clarified intent">
+          <p className="text-foreground/90">{parsed.clarifiedIntent}</p>
+        </Section>
+      )}
+
+      {parsed.improvedPrompt ? (
+        <NextPromptBox
+          label="Improved prompt"
+          prompt={parsed.improvedPrompt}
+          onCopy={() => onCopyPrompt(promptToCopy)}
+        />
+      ) : (
+        <FallbackCopyRow onCopy={() => onCopyPrompt(promptToCopy)} />
+      )}
+
+      {parsed.whyThisIsBetter.length > 0 && (
+        <Section title="Why this is better">
+          <ul className="space-y-1">
+            {parsed.whyThisIsBetter.slice(0, 3).map((r, i) => (
+              <li key={i} className="flex gap-2">
+                <span className="mt-[6px] h-1 w-1 shrink-0 rounded-full bg-foreground/60" />
+                <span>{r}</span>
+              </li>
+            ))}
+          </ul>
+        </Section>
+      )}
+
+      <ShowFullReviewToggle content={fullContent} />
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Raw fallback when parsing fails
+// ---------------------------------------------------------------------------
+
+function RawReviewerView({
+  msg,
+  onCopyPrompt,
+}: {
+  msg: ReviewMessage;
+  onCopyPrompt: (prompt: string) => void;
+}) {
+  // Heuristic: try the legacy extractor for a "NEXT PROMPT…" section.
+  const heuristic = copyTargetForReply(msg.content);
+  return (
+    <div className="space-y-3 text-[13px] leading-relaxed">
+      <div className="rounded-md border border-amber-500/40 bg-amber-500/10 p-2 text-[11px] text-amber-700 dark:text-amber-300">
+        Couldn't parse a structured response — showing the raw reply
+        below. You can still copy a best-guess prompt with the button.
+      </div>
+      <pre className="whitespace-pre-wrap font-sans text-[12.5px]">
+        {msg.content}
+      </pre>
+      <FallbackCopyRow onCopy={() => onCopyPrompt(heuristic)} />
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Sub-components shared between Critical / Coach views
+// ---------------------------------------------------------------------------
+
+function Section({
+  title,
+  children,
+}: {
+  title: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <section>
+      <h3 className="mb-1 text-[10.5px] font-semibold uppercase tracking-wider text-muted-foreground">
+        {title}
+      </h3>
+      <div>{children}</div>
+    </section>
+  );
+}
+
+const VERDICT_TONE_CLASSES: Record<
+  "ok" | "warn" | "danger" | "stop",
+  string
+> = {
+  ok: "border-emerald-500/40 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300",
+  warn: "border-amber-500/40 bg-amber-500/10 text-amber-700 dark:text-amber-300",
+  danger:
+    "border-orange-500/50 bg-orange-500/10 text-orange-700 dark:text-orange-300",
+  stop: "border-destructive/50 bg-destructive/10 text-destructive",
+};
+
+function VerdictBadge({
+  verdict,
+  raw,
+}: {
+  verdict: Verdict | null;
+  raw: string | null;
+}) {
+  if (!verdict) {
+    // Reviewer wrote something in VERDICT but it didn't classify. Show
+    // the raw text in a neutral pill so the user still sees the call.
+    if (!raw) return null;
+    return (
+      <div className="inline-flex items-center gap-1.5 rounded-md border border-border bg-muted/40 px-2 py-1 text-[12px] font-medium">
+        <Eye className="h-3.5 w-3.5" />
+        {raw}
+      </div>
+    );
+  }
+  const display = VERDICT_DISPLAY[verdict];
+  const Icon =
+    display.tone === "ok"
+      ? CheckCircle2
+      : display.tone === "warn"
+      ? AlertTriangle
+      : display.tone === "danger"
+      ? AlertCircle
+      : OctagonAlert;
+  return (
+    <div
+      className={cn(
+        "inline-flex items-center gap-1.5 rounded-md border px-2.5 py-1 text-[12.5px] font-semibold",
+        VERDICT_TONE_CLASSES[display.tone],
+      )}
+    >
+      <Icon className="h-4 w-4" />
+      {display.label}
+    </div>
+  );
+}
+
+function NextPromptBox({
+  label,
+  prompt,
+  onCopy,
+}: {
+  label: string;
+  prompt: string;
+  onCopy: () => void;
+}) {
+  return (
+    <section className="rounded-md border border-primary/40 bg-background p-3">
+      <div className="mb-1.5 flex items-center justify-between gap-2">
+        <h3 className="text-[10.5px] font-semibold uppercase tracking-wider text-primary">
+          {label}
+        </h3>
+        <Button
+          size="sm"
+          variant="outline"
+          className="h-7"
+          onClick={onCopy}
+          title="Copy this prompt to the clipboard (no fences, no preamble)"
         >
-          <header className="mb-1.5 flex items-center gap-2 text-[10.5px] uppercase tracking-wider text-muted-foreground">
-            <MessageSquare className="h-3 w-3" />
-            <span>{m.role}</span>
-            {m.model && (
-              <span className="font-mono text-[10px]">{m.model}</span>
-            )}
-            <span className="ms-auto">{formatRelative(m.created_at)}</span>
-            {m.estimated_tokens != null && (
-              <span className="font-mono text-[10px]">
-                ~{m.estimated_tokens} tk
-              </span>
-            )}
-            {m.provider_tokens != null && (
-              <span className="font-mono text-[10px]">
-                {m.provider_tokens} actual
-              </span>
-            )}
-          </header>
-          <pre className="whitespace-pre-wrap font-sans text-[12.5px]">
-            {m.content}
-          </pre>
-          {m.role === "reviewer" && (
-            <div className="mt-2 flex justify-end">
-              <Button
-                size="sm"
-                variant="outline"
-                className="h-7"
-                onClick={() => onCopyNextPrompt(m.content)}
-                title="Copy the 'next prompt for Claude Code' section"
-              >
-                <Copy className="h-3 w-3" />
-                Copy next prompt
-              </Button>
-            </div>
-          )}
-        </article>
-      ))}
+          <Copy className="h-3 w-3" />
+          Copy next prompt
+        </Button>
+      </div>
+      <pre className="whitespace-pre-wrap font-sans text-[12.5px] leading-relaxed text-foreground">
+        {prompt}
+      </pre>
+    </section>
+  );
+}
+
+function FallbackCopyRow({ onCopy }: { onCopy: () => void }) {
+  return (
+    <div className="flex justify-end">
+      <Button
+        size="sm"
+        variant="outline"
+        className="h-7"
+        onClick={onCopy}
+        title="Best-effort copy of any embedded next prompt"
+      >
+        <Copy className="h-3 w-3" />
+        Copy next prompt
+      </Button>
+    </div>
+  );
+}
+
+function ShowFullReviewToggle({ content }: { content: string }) {
+  const [open, setOpen] = React.useState(false);
+  return (
+    <div className="border-t border-border/60 pt-2">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className="flex items-center gap-1.5 text-[11px] text-muted-foreground transition-colors hover:text-foreground"
+      >
+        {open ? (
+          <ChevronDown className="h-3 w-3" />
+        ) : (
+          <ChevronRight className="h-3 w-3" />
+        )}
+        {open ? "Hide full review" : "Show full review"}
+      </button>
+      {open && (
+        <pre className="mt-2 max-h-[420px] overflow-auto whitespace-pre-wrap rounded border border-border/60 bg-muted/30 p-2 font-sans text-[12px] leading-relaxed text-foreground/90 scrollbar-thin">
+          {content}
+        </pre>
+      )}
     </div>
   );
 }

@@ -74,6 +74,40 @@ def test_build_prompt_coach_mode_uses_coach_instructions():
     assert pkt.audit_snapshot["reviewer_mode"] == "prompt_coach"
 
 
+def test_critical_prompt_requests_structured_section_labels():
+    """The frontend parser keys off these literal labels; if a future edit
+    drops or renames them the panel silently falls back to the raw view.
+    Lock the contract here."""
+    pkt = build_packet(_make_inputs(reviewer_mode="critical"), _clean_git())
+    for label in (
+        "VERDICT:",
+        "KEY FINDINGS:",
+        "MAIN RISK:",
+        "RECOMMENDED NEXT STEP:",
+        "NEXT PROMPT FOR CLAUDE CODE:",
+        "DETAILS:",
+    ):
+        assert label in pkt.prompt, f"missing {label!r} in critical prompt"
+    # All four allowed verdicts must be enumerated for the model to pick
+    # from, otherwise it might invent its own and the parser will return
+    # verdict=None.
+    assert "Good to proceed" in pkt.prompt
+    assert "Proceed with caution" in pkt.prompt
+    assert "Needs fix before continuing" in pkt.prompt
+    assert "Stop and investigate" in pkt.prompt
+
+
+def test_coach_prompt_requests_structured_section_labels():
+    pkt = build_packet(_make_inputs(reviewer_mode="prompt_coach"), _clean_git())
+    for label in (
+        "CLARIFIED INTENT:",
+        "IMPROVED PROMPT:",
+        "WHY THIS IS BETTER:",
+        "DETAILS:",
+    ):
+        assert label in pkt.prompt, f"missing {label!r} in coach prompt"
+
+
 def test_unknown_reviewer_mode_raises():
     with pytest.raises(ValueError, match="reviewer_mode"):
         build_packet(_make_inputs(reviewer_mode="banana"), _clean_git())
