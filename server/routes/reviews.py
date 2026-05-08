@@ -362,6 +362,11 @@ async def send(req: SendIn) -> MessageOut:
             _log.exception("review provider call failed")
             raise HTTPException(502, f"provider call failed: {e}") from e
 
+    # TODO: Promote `resume_attempted` / `resume_succeeded` to dedicated
+    # columns on review_messages so dashboards / audits can answer "how
+    # often does Codex resume actually work?" without having to JSON-decode
+    # every context_used_json blob. For now they live inside the JSON; this
+    # comment marks the upgrade path for a future migration v5.
     reviewer_msg = db.add_review_message(
         thread_id=req.thread_id,
         role="reviewer",

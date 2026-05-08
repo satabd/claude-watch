@@ -267,13 +267,29 @@ export function SessionToolbar() {
             size="sm"
             className="h-7"
             title="Discuss this work with another reviewer (Codex)"
-            onClick={() =>
+            onClick={() => {
+              // Toolbar entry: no specific turn was selected, so anchor the
+              // review to the most recent assistant result if there is one.
+              // Reviewer modes default to using this as evidence; the user
+              // can untick "Claude result" if they want a session-wide review.
+              const latestAssistant = session
+                ? [...session.events]
+                    .reverse()
+                    .find(
+                      (e) =>
+                        e.role === "assistant" &&
+                        !e.is_command_artifact &&
+                        e.text_blocks.length > 0,
+                    )
+                : null;
               openReviewPanel({
-                sourceTurnUuid: null,
-                sourceTurnRole: null,
-                sourceTurnText: null,
-              })
-            }
+                sourceTurnUuid: latestAssistant?.uuid ?? null,
+                sourceTurnRole: latestAssistant?.role ?? null,
+                sourceTurnText: latestAssistant
+                  ? latestAssistant.text_blocks.join("\n\n")
+                  : null,
+              });
+            }}
           >
             <ClipboardCheck className="h-3 w-3" />
             Review

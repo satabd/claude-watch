@@ -8,6 +8,10 @@ raise to exercise the cold-fallback path.
 Skips automatically if httpx isn't importable (TestClient depends on it
 but PyPI may be unreachable in this environment). Route behavior is also
 verified via a live curl smoke after the restart in that case.
+
+TODO: Re-enable this file in CI once httpx lands in the project
+environment. ``pip install httpx`` is enough; no code change needed.
+The skip is purely an environment limitation.
 """
 from __future__ import annotations
 

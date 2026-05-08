@@ -1,5 +1,6 @@
 import * as React from "react";
 import {
+  AlertCircle,
   ClipboardCheck,
   Copy,
   Eye,
@@ -23,6 +24,7 @@ import {
   type ReviewerMode,
 } from "@/lib/api";
 import { cn, formatRelative } from "@/lib/utils";
+import { sessionDisplayName } from "@/lib/session-display";
 import { copyTargetForReply } from "@/lib/extract-next-prompt";
 import { toast } from "sonner";
 
@@ -50,6 +52,31 @@ const EVIDENCE_LABELS: { key: keyof ReviewEvidenceFlags; label: string }[] = [
 
 const PREVIEW_DEBOUNCE_MS = 350;
 
+/** Build the default thread name for an auto-create. The spec wants two
+ *  shapes: "Review: <first 60 chars of result>" when anchored to a turn,
+ *  "Review: <session display>" when opened from the toolbar. We use the
+ *  session display as a fallback when the turn text is empty. */
+function defaultThreadName(args: {
+  fromTurn: boolean;
+  turnText: string | null;
+  sessionMeta: ReturnType<typeof useApp.getState>["session"] extends infer S
+    ? S extends { meta: infer M }
+      ? M
+      : null
+    : null;
+}): string {
+  const sessionLabel = args.sessionMeta
+    ? sessionDisplayName(args.sessionMeta as any, 60)
+    : "session";
+  if (args.fromTurn && args.turnText && args.turnText.trim()) {
+    const snippet = args.turnText.trim().replace(/\s+/g, " ").slice(0, 60);
+    return `Review: ${snippet}${args.turnText.length > 60 ? "…" : ""}`;
+  }
+  return `Review: ${sessionLabel}`;
+}
+
+type SetupState = "idle" | "loading" | "ready" | "error";
+
 export function ReviewPanel() {
   const session = useApp((s) => s.session);
   const open = useApp((s) => s.reviewPanel.open);
@@ -58,9 +85,10 @@ export function ReviewPanel() {
   const setField = useApp((s) => s.setReviewPanelField);
   const setEvidence = useApp((s) => s.setReviewEvidence);
 
-  const projectBucket = session?.meta.bucket ?? null;
-  const claudeSessionId = session?.meta.session_id ?? null;
-  const projectCwd = session?.meta.cwd ?? null;
+  const sessionMeta = session?.meta ?? null;
+  const projectBucket = sessionMeta?.bucket ?? null;
+  const claudeSessionId = sessionMeta?.session_id ?? null;
+  const projectCwd = sessionMeta?.cwd ?? null;
 
   const [threads, setThreads] = React.useState<ReviewThread[]>([]);
   const [messages, setMessages] = React.useState<ReviewMessage[]>([]);
@@ -69,26 +97,80 @@ export function ReviewPanel() {
   const [sending, setSending] = React.useState(false);
   const [creatingThread, setCreatingThread] = React.useState(false);
   const [secretOverride, setSecretOverride] = React.useState(false);
+  const [setupState, setSetupState] = React.useState<SetupState>("idle");
+  const [setupError, setSetupError] = React.useState<string | null>(null);
 
   const activeThread = threads.find((t) => t.id === panel.threadId) ?? null;
 
-  // Load threads when the panel opens (filtered by bucket if we have one).
-  const loadThreads = React.useCallback(async () => {
-    try {
-      const list = await api.reviewsList(projectBucket ?? undefined);
-      setThreads(list);
-      // Auto-select most recent thread if none chosen.
-      if (panel.threadId == null && list.length > 0) {
-        setField("threadId", list[0].id);
+  /** Find the most recent active thread for (bucket, claude_session_id) and
+   *  select it; otherwise auto-create one. Runs once per panel open. Calls
+   *  ONLY DB endpoints — never the reviewer LLM, so opening the panel never
+   *  spends Codex tokens. */
+  const ensureThread = React.useCallback(
+    async (
+      sourceTurnUuid: string | null,
+      sourceTurnText: string | null,
+    ): Promise<void> => {
+      setSetupState("loading");
+      setSetupError(null);
+      try {
+        const list = await api.reviewsList(projectBucket ?? undefined);
+        setThreads(list);
+        // Match by bucket + claude_session_id + not archived. Backend already
+        // filters by bucket; we add the session filter on the client so that
+        // distinct sessions in the same project never accidentally share a
+        // default thread.
+        const match = list.find(
+          (t) =>
+            !t.archived_at &&
+            (claudeSessionId == null ||
+              t.claude_session_id === claudeSessionId),
+        );
+        if (match) {
+          setField("threadId", match.id);
+          setSetupState("ready");
+          return;
+        }
+        // No match — auto-create. This is a DB-only operation; the reviewer
+        // LLM is only invoked on /send.
+        const name = defaultThreadName({
+          fromTurn: !!sourceTurnUuid,
+          turnText: sourceTurnText,
+          sessionMeta,
+        });
+        const created = await api.reviewsCreateThread({
+          name,
+          project_bucket: projectBucket,
+          claude_session_id: claudeSessionId,
+        });
+        setThreads((prev) => [created, ...prev]);
+        setField("threadId", created.id);
+        setSetupState("ready");
+      } catch (e: any) {
+        setSetupError(e?.message ?? "Could not prepare a review thread");
+        setSetupState("error");
       }
-    } catch (e: any) {
-      toast.error(e?.message ?? "Failed to load threads");
-    }
-  }, [projectBucket, panel.threadId, setField]);
+    },
+    [projectBucket, claudeSessionId, sessionMeta, setField],
+  );
 
+  // Trigger setup once each time the panel opens. Reset on close so the
+  // next open re-validates against the (possibly different) current
+  // session. We use a ref so React's StrictMode double-invoke doesn't
+  // create two threads.
+  const setupAttemptedRef = React.useRef(false);
   React.useEffect(() => {
-    if (open) loadThreads();
-  }, [open, loadThreads]);
+    if (!open) {
+      setupAttemptedRef.current = false;
+      setSetupState("idle");
+      setSetupError(null);
+      return;
+    }
+    if (!setupAttemptedRef.current) {
+      setupAttemptedRef.current = true;
+      ensureThread(panel.sourceTurnUuid, panel.sourceTurnText);
+    }
+  }, [open, ensureThread, panel.sourceTurnUuid, panel.sourceTurnText]);
 
   // Load messages when active thread changes.
   React.useEffect(() => {
@@ -157,12 +239,24 @@ export function ReviewPanel() {
     };
   }, [open, previewRequest, panel.question, panel.sourceTurnText]);
 
+  /** "New thread" button — explicit user action to start a SEPARATE thread
+   *  alongside whatever auto-setup picked. We disambiguate the name with a
+   *  short timestamp so two manually-created threads in the same minute
+   *  don't end up with identical labels. */
   const onCreateThread = async () => {
     setCreatingThread(true);
     try {
-      const name = `Review ${new Date().toLocaleString()}`;
+      const base = defaultThreadName({
+        fromTurn: !!panel.sourceTurnUuid,
+        turnText: panel.sourceTurnText,
+        sessionMeta,
+      });
+      const stamp = new Date().toLocaleTimeString(undefined, {
+        hour: "2-digit",
+        minute: "2-digit",
+      });
       const t = await api.reviewsCreateThread({
-        name,
+        name: `${base} (${stamp})`,
         project_bucket: projectBucket,
         claude_session_id: claudeSessionId,
       });
@@ -202,8 +296,12 @@ export function ReviewPanel() {
       setMessages((prev) => [...prev, reply]);
       setField("question", "");
       setSecretOverride(false);
-      // Refresh thread list (provider_session_id changed).
-      loadThreads();
+      // Refresh thread list so the "resume" badge reflects the freshly-stored
+      // provider_session_id. Pure DB read, no Codex call.
+      api
+        .reviewsList(projectBucket ?? undefined)
+        .then(setThreads)
+        .catch(() => {});
       toast.success("Reviewer replied");
     } catch (e: any) {
       // 409 SECRET_DETECTED carries hits — surface them and let the user
@@ -259,6 +357,11 @@ export function ReviewPanel() {
             onSelect={(id) => setField("threadId", id)}
             onCreate={onCreateThread}
             creating={creatingThread}
+            setupState={setupState}
+            setupError={setupError}
+            onRetrySetup={() =>
+              ensureThread(panel.sourceTurnUuid, panel.sourceTurnText)
+            }
           />
 
           <div className="flex min-w-0 flex-col overflow-y-auto scrollbar-thin">
@@ -315,12 +418,18 @@ function ThreadList({
   onSelect,
   onCreate,
   creating,
+  setupState,
+  setupError,
+  onRetrySetup,
 }: {
   threads: ReviewThread[];
   activeId: number | null;
   onSelect: (id: number) => void;
   onCreate: () => void;
   creating: boolean;
+  setupState: SetupState;
+  setupError: string | null;
+  onRetrySetup: () => void;
 }) {
   return (
     <aside className="flex flex-col border-e border-border bg-card/40">
@@ -331,8 +440,8 @@ function ThreadList({
           variant="outline"
           className="h-6"
           onClick={onCreate}
-          disabled={creating}
-          title="Create new thread"
+          disabled={creating || setupState === "loading"}
+          title="Start an additional separate review thread"
         >
           {creating ? (
             <Loader2 className="h-3 w-3 animate-spin" />
@@ -343,9 +452,29 @@ function ThreadList({
         </Button>
       </div>
       <div className="flex-1 overflow-y-auto scrollbar-thin">
-        {threads.length === 0 && (
-          <div className="px-3 py-2 text-[11px] text-muted-foreground">
-            No threads yet. Click <b>New</b> to start one for this project.
+        {setupState === "loading" && threads.length === 0 && (
+          <div className="flex items-center gap-2 px-3 py-2 text-[11px] text-muted-foreground">
+            <Loader2 className="h-3 w-3 animate-spin" />
+            Preparing review thread…
+          </div>
+        )}
+        {setupState === "error" && (
+          <div className="m-2 rounded-md border border-destructive/40 bg-destructive/10 p-2 text-[11px] text-destructive">
+            <div className="mb-1 flex items-center gap-1.5 font-medium">
+              <AlertCircle className="h-3 w-3" />
+              Couldn't prepare a review thread
+            </div>
+            <div className="mb-2 break-words text-[10.5px] opacity-90">
+              {setupError ?? "Unknown error"}
+            </div>
+            <Button
+              size="sm"
+              variant="outline"
+              className="h-6"
+              onClick={onRetrySetup}
+            >
+              Retry
+            </Button>
           </div>
         )}
         {threads.map((t) => (
