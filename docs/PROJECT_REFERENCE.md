@@ -1199,6 +1199,13 @@ versioning + provider session reset + robust parser + Markdown
 prompt box + per-turn anchor) is already past the point where
 returns diminish.
 
+> **Future direction for skills (not scheduled):** see
+> [`docs/SKILLS_TODO.md`](./SKILLS_TODO.md) for the planned move
+> from hard-coded Python skills to file-based, editable Markdown
+> skills (built-in / user / project scopes, content-addressed
+> `skill_hash`, hash-based session reset). No code change yet —
+> the document is the brief for a future session.
+
 ---
 
 ## Document maintenance
