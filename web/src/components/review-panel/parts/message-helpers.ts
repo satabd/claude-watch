@@ -26,6 +26,7 @@ export function reviewerModeFromMessage(m: ReviewMessage): SkillId {
     | null;
   const skill = ctx?.skill_id;
   if (
+    skill === "next_prompt_coach" ||
     skill === "quick_review" ||
     skill === "critical_review" ||
     skill === "prompt_coach"
@@ -33,6 +34,7 @@ export function reviewerModeFromMessage(m: ReviewMessage): SkillId {
     return skill;
   }
   const legacy = ctx?.reviewer_mode;
+  if (legacy === "next_prompt_coach") return "next_prompt_coach";
   if (legacy === "quick_review") return "quick_review";
   if (legacy === "prompt_coach") return "prompt_coach";
   if (legacy === "critical_review" || legacy === "critical") {
@@ -41,9 +43,11 @@ export function reviewerModeFromMessage(m: ReviewMessage): SkillId {
   return "critical_review";
 }
 
-/** Resolve the render mode for a message — Critical and Quick Review
- *  share the same compact verdict/why/next/prompt view; Prompt Coach has
- *  its own. */
+/** Resolve the render mode for a message. Critical, Quick Review, and
+ *  Next Prompt Coach all use the same compact view (verdict-style
+ *  leading sentence + optional understanding preamble + bullets +
+ *  next-action line + prompt + optional notes). Only Prompt Coach has
+ *  a different shape (clarified intent + improved prompt + reasons). */
 export function renderModeForSkill(skill: SkillId): ReviewerRenderMode {
   return skill === "prompt_coach" ? "prompt_coach" : "critical_or_quick";
 }

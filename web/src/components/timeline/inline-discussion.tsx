@@ -156,7 +156,11 @@ export function InlineDiscussion({
       await api.reviewsSend({
         thread_id: threadId,
         question: composer.trim(),
-        skill_id: "quick_review",
+        // Inline Discuss defaults to the Next Prompt Coach skill —
+        // strategy partner, not auditor. The full panel exposes
+        // Quick / Critical / Coach for users who want the audit
+        // flavor instead.
+        skill_id: "next_prompt_coach",
         claude_session_id: selectedSessionId,
         claude_turn_uuid: turnUuid,
         claude_turn_role: turnRole,
@@ -281,7 +285,7 @@ function InlineComposer({
     <div className="flex flex-col gap-2">
       <textarea
         value={value}
-        placeholder="Ask reviewer what to focus on…"
+        placeholder="Discuss this with the prompt coach: intention, direction, next prompt…"
         onChange={(e) => onChange(e.target.value)}
         onKeyDown={(e) => {
           if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
@@ -293,7 +297,7 @@ function InlineComposer({
       />
       <div className="flex items-center gap-2">
         <span className="text-[10.5px] text-muted-foreground/80">
-          Quick Review · ⌘ + Enter
+          Next Prompt Coach · ⌘ + Enter
         </span>
         <Button
           onClick={onSend}

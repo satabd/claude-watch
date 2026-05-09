@@ -408,7 +408,11 @@ export interface PromptDraft {
  *  is "Review Skill"; the typed values map 1:1 onto the backend SkillId. */
 export type ReviewerMode = SkillId;
 
-export type SkillId = "quick_review" | "critical_review" | "prompt_coach";
+export type SkillId =
+  | "next_prompt_coach"
+  | "quick_review"
+  | "critical_review"
+  | "prompt_coach";
 
 export interface ReviewSkill {
   id: SkillId;

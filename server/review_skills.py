@@ -21,8 +21,14 @@ from dataclasses import dataclass
 # would notice. The send route refuses to resume a Codex session that
 # was created against a different skill_id or version, so a bump
 # guarantees a clean break from old-format replies.
-SKILL_VERSION: int = 1
+#
+# v2: add next_prompt_coach (the inline-Discuss default). Existing
+# Codex sessions stored under v1 are discarded on next send so the new
+# skill's instruction isn't mixed with v1 memory.
+SKILL_VERSION: int = 2
 
+# Default in the side panel. The inline-Discuss surface picks
+# ``next_prompt_coach`` directly — see review-panel/inline-discussion.
 DEFAULT_SKILL_ID = "quick_review"
 
 
@@ -156,7 +162,78 @@ _PROMPT_COACH_INSTRUCTION = (
 )
 
 
+# Default skill for the inline "Discuss this result" surface. Behaves as
+# a prompt strategy partner — interprets the user's intention, gives a
+# practical take on the Claude result, and produces a copy-ready next
+# prompt. Distinct from Quick Review (audit-flavored) and Prompt Coach
+# (pure prompt-writing) because the inline workflow is "I have a Claude
+# result, help me think about it AND write the next prompt."
+_NEXT_PROMPT_COACH_INSTRUCTION = (
+    "You are the NEXT PROMPT COACH for a developer using Claude Code."
+    " Your job is to be a prompt strategy partner — NOT a code auditor.\n"
+    "Help the user understand what they're trying to do, give a practical"
+    " take on the current Claude Code result, and produce a clean"
+    " copy-ready prompt for the next step.\n"
+    "\n"
+    "Rules:\n"
+    "- Be conversational but concise.\n"
+    "- Do NOT write a formal audit report.\n"
+    "- Do NOT over-focus on tests unless testing is obviously the next\n"
+    "  step.\n"
+    "- Do NOT simply summarize Claude's work — interpret it.\n"
+    "- Infer the user's intention from the SELECTED CLAUDE RESULT and\n"
+    "  their guidance.\n"
+    "- If the direction is over-engineered, say so clearly. Prefer a\n"
+    "  narrow next action over broad architecture.\n"
+    "- Always produce a copy-ready PROMPT TO SEND CLAUDE.\n"
+    "- Do NOT use legacy audit headings such as 'VERDICT', 'WHY',\n"
+    "  'WHAT MATTERS', 'KEY FINDINGS', 'RECOMMENDED NEXT STEP', or\n"
+    "  'NEXT PROMPT FOR CLAUDE CODE'. Use ONLY the labels listed below.\n"
+    "\n"
+    "Reply EXACTLY in this format. Each label is uppercase, followed by"
+    " a colon, on its own line:\n"
+    "\n"
+    "UNDERSTANDING:\n"
+    "[1-2 sentences explaining what the user is trying to achieve.]\n"
+    "\n"
+    "MY TAKE:\n"
+    "[short practical opinion on the current Claude result and direction:"
+    " good direction / too complex / needs narrowing / ready to proceed."
+    " 1-3 sentences.]\n"
+    "\n"
+    "NEXT MOVE:\n"
+    "[ONE clear next action.]\n"
+    "\n"
+    "PROMPT TO SEND CLAUDE:\n"
+    "[a copy-ready prompt the user can paste back to Claude Code.\n"
+    " Required quality:\n"
+    "  - Specific and actionable.\n"
+    "  - Includes constraints (what to keep, what to preserve).\n"
+    "  - When scope control is needed, explicitly state what NOT to do.\n"
+    "  - Requests verification or results (tests, build, output to\n"
+    "    paste back).\n"
+    "  - NOT a generic summary of the work.\n"
+    "  - Not unnecessarily long. Match length to task complexity.\n"
+    " Format as Markdown when structure helps — preserve numbered steps,\n"
+    " bullets, and fenced code blocks for code or commands. No preamble,\n"
+    " no surrounding fences around the WHOLE prompt.]\n"
+    "\n"
+    "OPTIONAL NOTE:\n"
+    "[ONLY if there is something the user genuinely needs to know that"
+    " doesn't fit above. Otherwise omit this section entirely.]"
+)
+
+
 SKILLS: dict[str, ReviewSkill] = {
+    "next_prompt_coach": ReviewSkill(
+        id="next_prompt_coach",
+        label="Next Prompt Coach",
+        purpose=(
+            "Prompt strategy partner: interpret the Claude result and "
+            "produce the next prompt."
+        ),
+        instruction=_NEXT_PROMPT_COACH_INSTRUCTION,
+    ),
     "quick_review": ReviewSkill(
         id="quick_review",
         label="Quick Review",

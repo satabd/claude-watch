@@ -151,6 +151,17 @@ function CriticalReviewView({
 }) {
   return (
     <div className="space-y-3 text-[13px] leading-relaxed">
+      {parsed.understanding && (
+        // Small italic preamble. Only the Next Prompt Coach skill emits
+        // an UNDERSTANDING section; older skills leave this null and
+        // the line is skipped. Distinct from the verdict so the
+        // reader sees "what the user is trying to do" before the
+        // reviewer's take on it.
+        <p className="text-[12.5px] italic leading-relaxed text-muted-foreground">
+          {parsed.understanding}
+        </p>
+      )}
+
       {parsed.verdict && (
         <p className="text-[14px] font-medium text-foreground">
           {parsed.verdict}

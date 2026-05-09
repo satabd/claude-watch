@@ -260,6 +260,84 @@ Tighten the guard.
   });
 });
 
+// ---------------------------------------------------------------------------
+// parseCriticalReview — Next Prompt Coach format (inline-Discuss default)
+// ---------------------------------------------------------------------------
+
+const SAMPLE_NEXT_PROMPT_COACH = `UNDERSTANDING:
+You want to keep the parser permissive for legacy review messages
+without rewriting the data model.
+
+MY TAKE:
+Good direction. The change is small and preserves back-compat.
+
+NEXT MOVE:
+Add a single regression test for the bold-around-numbered heading
+variant before merging.
+
+PROMPT TO SEND CLAUDE:
+Add a test in review-parser.test.ts that feeds
+\`**6. NEXT PROMPT FOR CLAUDE CODE:**\` to parseCriticalReview and
+asserts \`nextPrompt\` is non-null. Do not add any new heading
+variants beyond what exists today.
+
+OPTIONAL NOTE:
+Skip if the existing 'tolerates markdown bold around headings'
+test already covers it.
+`;
+
+describe("parseCriticalReview (Next Prompt Coach format)", () => {
+  it("extracts understanding / verdict (from MY TAKE) / nextAction (from NEXT MOVE) / nextPrompt", () => {
+    const r = parseCriticalReview(SAMPLE_NEXT_PROMPT_COACH);
+    expect(r.parsed).toBe(true);
+    expect(r.understanding).toContain("permissive for legacy review messages");
+    // MY TAKE → verdict (the role is the same: bold leading sentence).
+    expect(r.verdict).toContain("Good direction");
+    // No WHY section in this skill.
+    expect(r.why).toEqual([]);
+    // NEXT MOVE → nextAction.
+    expect(r.nextAction).toContain("regression test");
+    // PROMPT TO SEND CLAUDE → nextPrompt.
+    expect(r.nextPrompt).toContain("review-parser.test.ts");
+    expect(r.nextPrompt).toContain("`**6. NEXT PROMPT FOR CLAUDE CODE:**`");
+    // OPTIONAL NOTE → details (singular here; OPTIONAL NOTES plural
+    // for Quick/Critical maps to the same field).
+    expect(r.details).toContain("Skip if the existing");
+  });
+
+  it("understanding is null for skills that don't emit it", () => {
+    // Quick / Critical replies don't include UNDERSTANDING; the field
+    // must stay null so the view's italic preamble is skipped.
+    const r = parseCriticalReview(SAMPLE_CRITICAL);
+    expect(r.parsed).toBe(true);
+    expect(r.understanding).toBeNull();
+  });
+
+  it("MY TAKE alone is enough to mark the reply parsed", () => {
+    // The Next Prompt Coach skill has no WHY bullets; the parser
+    // must still treat the reply as structured even without them.
+    const text = `MY TAKE:\nLooks good.\n\nPROMPT TO SEND CLAUDE:\nProceed.\n`;
+    const r = parseCriticalReview(text);
+    expect(r.parsed).toBe(true);
+    expect(r.verdict).toBe("Looks good.");
+    expect(r.nextPrompt).toBe("Proceed.");
+    expect(r.understanding).toBeNull();
+    expect(r.why).toEqual([]);
+  });
+
+  it("UNDERSTANDING alone (no other sections) still flips parsed=true", () => {
+    // Edge case: a malformed reply that only included UNDERSTANDING.
+    // The view should still take the structured path so the field is
+    // visible, rather than falling back to RawReviewerView.
+    const text = `UNDERSTANDING:\nYou want X.\n`;
+    const r = parseCriticalReview(text);
+    expect(r.parsed).toBe(true);
+    expect(r.understanding).toBe("You want X.");
+    expect(r.verdict).toBeNull();
+    expect(r.nextPrompt).toBeNull();
+  });
+});
+
 describe("parseCriticalReview (legacy format back-compat)", () => {
   it("maps KEY FINDINGS → why and RECOMMENDED NEXT STEP → nextAction", () => {
     const r = parseCriticalReview(SAMPLE_CRITICAL_LEGACY);

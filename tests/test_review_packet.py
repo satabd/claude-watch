@@ -117,6 +117,27 @@ def test_coach_skill_uses_unified_prompt_label():
     # We just assert the canonical labels are present.
 
 
+def test_next_prompt_coach_skill_uses_strategy_partner_labels():
+    """The inline Discuss-this-result skill ships its own label set
+    so the parser can route the response to the right view variant
+    without confusing it with Quick/Critical Review."""
+    pkt = build_packet(
+        _make_inputs(skill_id="next_prompt_coach"), _clean_git()
+    )
+    for label in (
+        "UNDERSTANDING:",
+        "MY TAKE:",
+        "NEXT MOVE:",
+        "PROMPT TO SEND CLAUDE:",
+        "OPTIONAL NOTE:",
+    ):
+        assert label in pkt.prompt, f"missing {label!r} in next_prompt_coach"
+    # Audit snapshot records the skill so post-hoc analysis can answer
+    # "which preset produced this exchange?" without inspecting the
+    # full prompt body.
+    assert pkt.audit_snapshot["skill_id"] == "next_prompt_coach"
+
+
 def test_unknown_skill_id_raises():
     with pytest.raises(ValueError, match="skill_id"):
         build_packet(_make_inputs(skill_id="banana"), _clean_git())
