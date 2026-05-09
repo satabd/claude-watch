@@ -11,6 +11,7 @@ import type {
   TranscriptEvent,
 } from "@/lib/api";
 import { loadPersisted } from "@/lib/persisted-state";
+import type { GroupedReviewMessages } from "@/lib/review-grouping";
 
 interface AppState {
   projects: ProjectMeta[];
@@ -140,6 +141,24 @@ interface AppState {
     value: AppState["reviewPanel"][K]
   ) => void;
   setReviewEvidence: (key: keyof ReviewEvidenceFlags, value: boolean) => void;
+
+  /** Per-Claude-session review-message grouping. Populated by the
+   *  session-load effect in App.tsx after the timeline data arrives:
+   *  list active threads for (bucket, claude_session_id), fetch their
+   *  messages, group by source_turn_uuid. Inline rendering (Phase C)
+   *  reads from this map; the side panel keeps its own local state and
+   *  is unaffected.
+   *
+   *  Keyed by ``claude_session_id``. Sessions with no review activity
+   *  may have no entry; consumers should treat that as
+   *  ``EMPTY_GROUPED_REVIEW_MESSAGES``. */
+  reviewMessagesBySession: Record<string, GroupedReviewMessages>;
+  reviewMessagesLoadingBySession: Record<string, boolean>;
+  setReviewMessagesForSession: (
+    sessionId: string,
+    grouped: GroupedReviewMessages,
+  ) => void;
+  setReviewMessagesLoading: (sessionId: string, loading: boolean) => void;
 }
 
 // Pull the persisted UI slice once on module init. `loadPersisted()` is
@@ -348,4 +367,30 @@ export const useApp = create<AppState>((set) => ({
         evidence: { ...s.reviewPanel.evidence, [key]: value },
       },
     })),
+
+  // Review messages grouped by source_turn_uuid (Phase B data plumbing).
+  // No UI consumes these yet; Phase C will hang inline discussions off
+  // them. The setters intentionally short-circuit when nothing changed
+  // so consumers using `useApp((s) => s.reviewMessagesBySession[id])`
+  // don't see false re-renders.
+  reviewMessagesBySession: {},
+  reviewMessagesLoadingBySession: {},
+  setReviewMessagesForSession: (sessionId, grouped) =>
+    set((s) => ({
+      reviewMessagesBySession: {
+        ...s.reviewMessagesBySession,
+        [sessionId]: grouped,
+      },
+    })),
+  setReviewMessagesLoading: (sessionId, loading) =>
+    set((s) => {
+      const cur = s.reviewMessagesLoadingBySession[sessionId];
+      if (cur === loading) return s;
+      return {
+        reviewMessagesLoadingBySession: {
+          ...s.reviewMessagesLoadingBySession,
+          [sessionId]: loading,
+        },
+      };
+    }),
 }));

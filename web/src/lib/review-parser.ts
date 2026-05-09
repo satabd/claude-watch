@@ -63,10 +63,11 @@ const KNOWN_HEADINGS = [
   "MAIN RISK",
   "RECOMMENDED NEXT STEP",
   "NEXT PROMPT FOR CLAUDE CODE",
-  // Coach mode labels (unchanged).
+  // Coach mode labels — current and legacy.
   "CLARIFIED INTENT",
-  "IMPROVED PROMPT",
-  "WHY THIS IS BETTER",
+  "WHY THIS WORKS",      // current (matches review_skills.py:_PROMPT_COACH_INSTRUCTION)
+  "IMPROVED PROMPT",     // legacy alias for the prompt section
+  "WHY THIS IS BETTER",  // legacy alias for the rationale bullets
 ] as const;
 
 type KnownHeading = (typeof KNOWN_HEADINGS)[number];
@@ -265,10 +266,22 @@ export function parseCoachReview(text: string): CoachReview {
   }
   const sections = parseSections(text);
   const clarifiedIntent = sections.get("CLARIFIED INTENT")?.trim() || null;
-  const rawImproved = sections.get("IMPROVED PROMPT")?.trim() || null;
+  // Coach skill switched from "IMPROVED PROMPT" to the unified
+  // "PROMPT TO SEND CLAUDE" label when the skill registry landed.
+  // Prefer the new label; fall back to the legacy one for messages
+  // produced before the switch.
+  const rawImproved =
+    sections.get("PROMPT TO SEND CLAUDE")?.trim() ||
+    sections.get("IMPROVED PROMPT")?.trim() ||
+    null;
   const improvedPrompt = rawImproved ? stripFences(rawImproved) : null;
+  // Coach skill renamed "WHY THIS IS BETTER" -> "WHY THIS WORKS" when
+  // the skill registry landed. Prefer the new label; fall back to the
+  // legacy one for older messages.
   const whyThisIsBetter = parseBullets(
-    sections.get("WHY THIS IS BETTER") ?? "",
+    sections.get("WHY THIS WORKS") ??
+      sections.get("WHY THIS IS BETTER") ??
+      "",
     5,
   );
   const details = sections.get("DETAILS")?.trim() || null;
