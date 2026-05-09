@@ -87,12 +87,17 @@ export function ReviewerMessageView({
     [msg.content, renderMode],
   );
 
-  // Short label shown in the message header — Quick / Critical / Coach.
+  // Short label shown in the message header. Each skill maps to its own
+  // human-readable label; falling through to "critical" was a bug for
+  // next_prompt_coach (whose body was rendered correctly but whose
+  // header was mislabeled).
   const skillLabel =
     skill === "quick_review"
       ? "quick"
       : skill === "prompt_coach"
       ? "coach"
+      : skill === "next_prompt_coach"
+      ? "next prompt coach"
       : "critical";
 
   return (
