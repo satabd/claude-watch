@@ -39,6 +39,7 @@ import {
   parseCriticalReview,
 } from "@/lib/review-parser";
 import { effectiveQuestion } from "./effective-question";
+import { refreshGroupedReviewMessages } from "@/lib/review-loader";
 import {
   reviewerModeFromMessage,
   renderModeForSkill,
@@ -121,6 +122,9 @@ export function ReviewPanel() {
   const claudeSessionId = sessionMeta?.session_id ?? null;
   const projectCwd = sessionMeta?.cwd ?? null;
 
+  const setReviewMessagesForSession = useApp(
+    (s) => s.setReviewMessagesForSession,
+  );
   const [threads, setThreads] = React.useState<ReviewThread[]>([]);
   const [messages, setMessages] = React.useState<ReviewMessage[]>([]);
   const [preview, setPreview] = React.useState<ReviewPreview | null>(null);
@@ -407,6 +411,17 @@ export function ReviewPanel() {
         .reviewsList(projectBucket ?? undefined)
         .then(setThreads)
         .catch(() => {});
+      // Phase C: also refresh the global per-session grouped map so
+      // the inline-discussion surface under each Claude turn picks
+      // up this new exchange immediately. Non-fatal on failure —
+      // logged inside the helper.
+      if (projectBucket && claudeSessionId) {
+        refreshGroupedReviewMessages(
+          projectBucket,
+          claudeSessionId,
+          setReviewMessagesForSession,
+        );
+      }
       toast.success("Reviewer replied");
     } catch (e: any) {
       // 409 SECRET_DETECTED carries hits — surface them and let the user

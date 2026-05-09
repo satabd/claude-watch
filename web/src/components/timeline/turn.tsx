@@ -8,9 +8,11 @@ import {
   Bot,
   Copy,
   ExternalLink,
+  MessageCircle,
   Wand2,
   ClipboardCheck,
 } from "lucide-react";
+import { InlineDiscussion } from "./inline-discussion";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger, TooltipProvider } from "@/components/ui/tooltip";
@@ -107,6 +109,12 @@ function TurnBody({ text, uuid, role }: { text: string; uuid: string; role: stri
   const setShowTr = useApp((s) => s.setShownTranslated);
   const openPromptWriter = useApp((s) => s.openPromptWriter);
   const openReviewPanel = useApp((s) => s.openReviewPanel);
+
+  // Inline discussion expand state. Hoisted here (rather than inside
+  // InlineDiscussion) so the AssistantActionRow's "Discuss this
+  // result" button can toggle it. Local React state is preserved
+  // across timeline re-renders because Turn keys on this turn's uuid.
+  const [discussExpanded, setDiscussExpanded] = React.useState(false);
 
   const onToggle = async () => {
     if (showTr) {
@@ -212,36 +220,48 @@ function TurnBody({ text, uuid, role }: { text: string; uuid: string; role: stri
         </div>
       )}
       {role === "assistant" && (
-        <AssistantActionRow uuid={uuid} role={role} text={text} />
+        <>
+          <InlineDiscussion
+            turnUuid={uuid}
+            turnRole={role}
+            turnText={text}
+            expanded={discussExpanded}
+            onSetExpanded={setDiscussExpanded}
+          />
+          <AssistantActionRow
+            uuid={uuid}
+            role={role}
+            text={text}
+            onDiscussToggle={() => setDiscussExpanded((v) => !v)}
+          />
+        </>
       )}
     </div>
   );
 }
 
-/** Always-visible action row anchored to an assistant message. The Review
- *  button captures THIS exact message as the review subject — the panel's
- *  source_turn_uuid is set to ``uuid`` and the subject card shows
- *  ``text``. No reviewer call is fired by clicking Review; the user must
- *  press Send (or enable Auto Review and Send) inside the panel. */
+/** Always-visible action row anchored to an assistant message. The
+ *  "Discuss this result" button toggles an inline review-discussion
+ *  block under THIS exact message (see ``InlineDiscussion``). The
+ *  side panel — used for advanced controls like skill picking,
+ *  evidence toggles, or thread management — is reachable via the
+ *  toolbar Review button or the "Open in full panel" link inside the
+ *  inline block, not from this row.
+ *
+ *  No reviewer call is fired by clicking "Discuss this result"; the
+ *  user must type guidance and click Send inside the inline block. */
 function AssistantActionRow({
   uuid,
   role,
   text,
+  onDiscussToggle,
 }: {
   uuid: string;
   role: string | null;
   text: string;
+  onDiscussToggle: () => void;
 }) {
   const openPromptWriter = useApp((s) => s.openPromptWriter);
-  const openReviewPanel = useApp((s) => s.openReviewPanel);
-
-  const onReview = () => {
-    openReviewPanel({
-      sourceTurnUuid: uuid,
-      sourceTurnRole: role,
-      sourceTurnText: text,
-    });
-  };
 
   const onWritePrompt = () => {
     openPromptWriter({
@@ -261,16 +281,21 @@ function AssistantActionRow({
     }
   };
 
+  // role param is unused after the inline-discussion shift, but kept
+  // in the signature so future callers don't have to re-thread the
+  // role/uuid pair. Silence the unused-param warning explicitly.
+  void role;
+
   return (
     <div className="mt-2 flex flex-wrap items-center gap-1.5 text-[11px] text-muted-foreground">
       <button
         type="button"
-        onClick={onReview}
+        onClick={onDiscussToggle}
         className="inline-flex items-center gap-1 rounded-md border border-border bg-background/40 px-2 py-0.5 transition-colors hover:border-primary/50 hover:bg-primary/5 hover:text-foreground"
-        title="Open Review Chat anchored to this exact Claude message"
+        title="Open or close inline review discussion for this message"
       >
-        <ClipboardCheck className="h-3 w-3" />
-        Review this
+        <MessageCircle className="h-3 w-3" />
+        Discuss this result
       </button>
       <button
         type="button"

@@ -8,7 +8,7 @@ import { StatusBar } from "@/components/status-bar";
 import { useApp } from "@/store/app";
 import { api } from "@/lib/api";
 import { liveStream, type LiveEvent } from "@/lib/sse";
-import { groupReviewMessagesByTurn } from "@/lib/review-grouping";
+import { loadGroupedReviewMessages } from "@/lib/review-loader";
 
 // Lazy-load heavy sheets so they don't ship in the initial bundle. SettingsSheet
 // pulls RemotesManager (~685 lines) with it; PromptWriter is the largest single
@@ -98,49 +98,28 @@ export default function App() {
     };
   }, [selectedBucket, selectedSessionId, setSession, setSessionLoading, clearSelection]);
 
-  // After a session loads, fetch the active review threads for this
-  // (bucket, claude_session_id) and group their messages by
-  // ``source_turn_uuid``. Phase B data plumbing — no UI consumes the
-  // resulting map yet; Phase C will hang inline review discussions
-  // off it under each Claude turn.
+  // After a session loads, populate the per-session grouped review-
+  // message map. Used by the inline-discussion UI (Phase C) under
+  // each assistant turn; the side panel keeps its own local message
+  // state independently.
   React.useEffect(() => {
     if (!selectedBucket || !selectedSessionId) return;
+    const bucket = selectedBucket;
+    const sessionId = selectedSessionId;
     let cancelled = false;
-    setReviewMessagesLoading(selectedSessionId, true);
-    (async () => {
-      try {
-        const threads = await api.reviewsList(selectedBucket);
-        const matching = threads.filter(
-          (t) =>
-            t.claude_session_id === selectedSessionId && !t.archived_at,
-        );
-        if (matching.length === 0) {
-          if (!cancelled) {
-            setReviewMessagesForSession(selectedSessionId, {
-              byTurn: new Map(),
-              noAnchor: [],
-              count: 0,
-            });
-          }
-          return;
-        }
-        const lists = await Promise.all(
-          matching.map((t) => api.reviewsListMessages(t.id)),
-        );
-        if (cancelled) return;
-        const flat = lists.flat();
-        setReviewMessagesForSession(
-          selectedSessionId,
-          groupReviewMessagesByTurn(flat),
-        );
-      } catch (e) {
-        // Non-fatal: inline mode just won't show notes. Don't crash the
-        // timeline over a review-list failure.
+    setReviewMessagesLoading(sessionId, true);
+    loadGroupedReviewMessages(bucket, sessionId)
+      .then((grouped) => {
+        if (!cancelled) setReviewMessagesForSession(sessionId, grouped);
+      })
+      .catch((e) => {
+        // Non-fatal: inline mode just won't show notes. Don't crash
+        // the timeline over a review-list failure.
         console.warn("review messages fetch failed", e);
-      } finally {
-        if (!cancelled) setReviewMessagesLoading(selectedSessionId, false);
-      }
-    })();
+      })
+      .finally(() => {
+        if (!cancelled) setReviewMessagesLoading(sessionId, false);
+      });
     return () => {
       cancelled = true;
     };
