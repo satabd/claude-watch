@@ -4,6 +4,7 @@ import remarkGfm from "remark-gfm";
 import {
   Languages,
   Loader2,
+  RefreshCw,
   User,
   Bot,
   Copy,
@@ -140,6 +141,31 @@ function TurnBody({ text, uuid, role }: { text: string; uuid: string; role: stri
   const translated = translation && translation !== "pending" ? translation.translation : null;
   const pending = translation === "pending";
 
+  // Force a fresh translation from the *current* provider. The server
+  // translations cache is keyed only by (source text, language), so
+  // switching provider in Settings never produces a new translation
+  // on its own — the cache hit short-circuits first. Passing force
+  // makes /api/translate skip its cache and INSERT OR REPLACE the
+  // stored row. Deliberately NOT routed through onToggle, which
+  // early-returns whenever a translation already exists.
+  const onRetranslate = async () => {
+    if (pending) return;
+    const prev = translation;
+    setTranslation(uuid, "pending");
+    try {
+      const r = await api.translate(text, "ar", true);
+      setTranslation(uuid, { translation: r.translation, model: r.model });
+      setShowTr(uuid, true);
+      toast.success("Re-translated");
+    } catch (e: any) {
+      // Restore the prior translation so a failed retry doesn't
+      // discard a translation the user already had. The early return
+      // above guarantees prev is not "pending" here.
+      setTranslation(uuid, prev ?? null);
+      toast.error(e?.message ?? "Re-translation failed");
+    }
+  };
+
   return (
     <div className="relative">
       <div className="absolute -end-2 top-0 flex flex-col gap-1 opacity-0 transition-opacity group-hover/turn:opacity-100">
@@ -163,6 +189,28 @@ function TurnBody({ text, uuid, role }: { text: string; uuid: string; role: stri
             <TooltipContent>{showTr ? "Show original" : "Translate to Arabic"}</TooltipContent>
           </Tooltip>
         </TooltipProvider>
+        {translation && (
+          <TooltipProvider>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  onClick={onRetranslate}
+                  disabled={pending}
+                  className="h-6 w-6"
+                >
+                  <RefreshCw
+                    className={cn("h-3 w-3", pending && "animate-spin")}
+                  />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>
+                Re-translate with the current provider
+              </TooltipContent>
+            </Tooltip>
+          </TooltipProvider>
+        )}
         <TooltipProvider>
           <Tooltip>
             <TooltipTrigger asChild>
