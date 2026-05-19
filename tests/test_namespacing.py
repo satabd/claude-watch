@@ -46,3 +46,45 @@ def test_remote_session_bucket_is_namespaced(tmp_path):
     assert meta.bucket == "remote:my-host:-home-user-project"
     assert meta.remote_name == "my-host"
     assert meta.cwd == "/home/user/project"
+
+
+def test_remote_session_bucket_inferred_from_path(tmp_path, monkeypatch):
+    """A file physically under REMOTES_ROOT is namespaced even when the
+    caller passes no remote_name.
+
+    This is the GET /api/sessions/{bucket}/{id} path: find_session()
+    resolves a remote file, then session_meta() is called without the
+    host. Regression test for the infinite "Switching session…"
+    skeleton — the detail endpoint must return the same namespaced
+    bucket that /api/projects advertised, or the frontend's
+    selection/meta comparison never matches."""
+    import server.projects as projects_mod
+
+    remotes_root = tmp_path / "remotes"
+    monkeypatch.setattr(projects_mod, "REMOTES_ROOT", remotes_root)
+
+    session_path = (
+        remotes_root / "my-host" / "-home-user-project" / "xyz789.jsonl"
+    )
+    _write_session(session_path, cwd="/home/user/project")
+
+    # No remote_name argument — mirrors get_session()'s call.
+    meta = session_meta(session_path)
+    assert meta.session_id == "xyz789"
+    assert meta.bucket == "remote:my-host:-home-user-project"
+    assert meta.remote_name == "my-host"
+
+
+def test_local_session_not_misclassified_as_remote(tmp_path, monkeypatch):
+    """A local file is left un-namespaced even with REMOTES_ROOT set —
+    the inference must not fire for paths outside the remote mirror."""
+    import server.projects as projects_mod
+
+    monkeypatch.setattr(projects_mod, "REMOTES_ROOT", tmp_path / "remotes")
+
+    session_path = tmp_path / "projects" / "-D--my-project" / "abc.jsonl"
+    _write_session(session_path)
+
+    meta = session_meta(session_path)
+    assert meta.bucket == "-D--my-project"
+    assert meta.remote_name is None

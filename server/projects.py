@@ -134,6 +134,20 @@ def session_meta(file_path: Path, remote_name: str | None = None) -> SessionMeta
     title = _read_ai_title(file_path)
     first_prompt, last_model = _read_first_prompt_and_last_model(file_path)
     bucket_name = file_path.parent.name
+    # When the caller didn't say, infer whether this file lives in a
+    # remote mirror — REMOTES_ROOT/<host>/<bucket>/<file>.jsonl. The
+    # GET /api/sessions/{bucket}/{id} route resolves a path via
+    # find_session() without passing remote_name; without this the
+    # response bucket would drop the "remote:<host>:" prefix that
+    # GET /api/projects advertised, and the frontend would sit on a
+    # permanent selection/meta mismatch ("Switching session…" forever).
+    if remote_name is None:
+        try:
+            parts = file_path.relative_to(REMOTES_ROOT).parts
+        except ValueError:
+            parts = ()
+        if len(parts) >= 3:
+            remote_name = parts[0]
     # Namespace remote bucket names so they don't collide with local ones
     if remote_name:
         bucket_name = f"remote:{remote_name}:{bucket_name}"
