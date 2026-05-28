@@ -1,43 +1,56 @@
 # Claude Watcher
 
-A standalone, local viewer for your Claude Code sessions. Mirrors every active
-conversation in real time, lets you translate / clarify / summarize / export
-without polluting the running session, and bridges remote work via SSH so
-sessions running in WSL or on a dev box show up alongside local ones.
+> A standalone, local viewer for your Claude Code sessions. Mirrors every active conversation in real time, lets you translate / clarify / summarize / export without polluting the running session, and bridges remote work via SSH so sessions running in WSL or on a dev box show up alongside local ones.
 
-Runs entirely on your machine. No API keys, no cloud sync, no telemetry.
-Uses the OAuth/subscription you already have in `claude` and/or `codex` CLIs.
+[![Python](https://img.shields.io/badge/python-3.10%2B-3776ab.svg?logo=python&logoColor=white)](https://www.python.org/)
+[![Node](https://img.shields.io/badge/node-18%2B-339933.svg?logo=node.js&logoColor=white)](https://nodejs.org/)
+[![FastAPI](https://img.shields.io/badge/FastAPI-009688.svg?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
+[![React](https://img.shields.io/badge/React-18-61dafb.svg?logo=react&logoColor=black)](https://react.dev/)
+[![TypeScript](https://img.shields.io/badge/TypeScript-5-3178c6.svg?logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
+[![SQLite](https://img.shields.io/badge/SQLite-cache-003b57.svg?logo=sqlite&logoColor=white)](https://www.sqlite.org/)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+[![Local-first](https://img.shields.io/badge/data-local%20only-7c3aed.svg)](#privacy--data-flow)
+[![Platforms](https://img.shields.io/badge/platforms-Windows%20%7C%20macOS%20%7C%20Linux%20%7C%20WSL-blue.svg)]()
+
+Runs entirely on your machine. No API keys, no cloud sync, no telemetry. Uses the OAuth/subscription you already have in the `claude` and/or `codex` CLIs.
 
 ---
 
-## What it does
+## Table of Contents
 
-- **Live mirror.** Every Claude Code session on this machine — local CLI,
-  Claude Desktop, and remote SSH sessions — appears in the sidebar and
-  updates in real time as new turns arrive.
-- **Per-turn translate toggle** (Arabic by default). Click ⇄ on any turn,
-  it flips to Arabic in place. Cached forever in SQLite by `sha256(text)`,
-  so re-toggling is instant and free.
-- **Selection popover.** Highlight any text in the timeline → floating
-  toolbar with **Translate / Clarify / Summarize / Explain code / Glossary /
-  Comment / Turn into prompt**. Results land in the scratchpad, not the
-  original Claude session.
-- **Context-Aware Prompt Writer.** Sheet UI with 8 writer modes (Improve /
-  Clarify / Developer Task / Bug Report / Design / Adversarial Review /
-  Short Command / Continue Conversation) × 8 context modes (auto / none /
-  current item / selected / recent / focused / expanded / full session).
-  Auto-mode picks the smallest needed context based on entry point + rough
-  input + writer mode.
-- **AI session summary.** One click → markdown summary of an entire session,
-  cached by transcript hash.
-- **Multi-host SSH.** Add a remote (or one-click "Discover WSL"); the watcher
-  keeps a persistent SSH/SFTP connection, polls every 2s, append-fetches new
-  bytes, and feeds them into the same SSE stream as local sessions.
-- **VS Code–style status bar** with project / branch / entrypoint / session
-  id (click-to-copy) / turn count / token usage / cost / model / provider /
-  live indicator.
-- **Export** — full transcript or "prompts only" (numbered list of your
-  inputs) as Markdown.
+- [Features](#features)
+- [Quick start](#quick-start-5-minutes)
+  - [Requirements](#requirements)
+  - [Install](#install)
+  - [Run](#run)
+  - [Configure providers](#configure-providers-one-time)
+  - [Add a WSL or remote machine](#add-a-wsl-or-remote-machine-optional)
+- [Daily-use cheatsheet](#daily-use-cheatsheet)
+- [Architecture](#architecture-for-developers)
+  - [Pipelines](#pipelines)
+  - [Layout](#layout)
+  - [Database schema](#database-schema)
+  - [Provider abstraction](#provider-abstraction)
+  - [Configurable poll intervals](#configurable-poll-intervals)
+- [Privacy / data flow](#privacy--data-flow)
+- [Contributing](#contributing)
+- [License](#license)
+- [Acknowledgments](#acknowledgments)
+
+---
+
+## Features
+
+- **Live mirror.** Every Claude Code session on this machine — local CLI, Claude Desktop, and remote SSH sessions — appears in the sidebar and updates in real time as new turns arrive.
+- **Per-turn translate toggle** (Arabic by default). Click ⇄ on any turn, it flips to Arabic in place. Cached forever in SQLite by `sha256(text)`, so re-toggling is instant and free.
+- **Selection popover.** Highlight any text in the timeline → floating toolbar with **Translate / Clarify / Summarize / Explain code / Glossary / Comment / Turn into prompt**. Results land in the scratchpad, not the original Claude session.
+- **Context-Aware Prompt Writer.** Sheet UI with 8 writer modes (Improve / Clarify / Developer Task / Bug Report / Design / Adversarial Review / Short Command / Continue Conversation) × 8 context modes (auto / none / current item / selected / recent / focused / expanded / full session). Auto-mode picks the smallest needed context based on entry point + rough input + writer mode.
+- **AI session summary.** One click → markdown summary of an entire session, cached by transcript hash.
+- **Multi-host SSH.** Add a remote (or one-click "Discover WSL"); the watcher keeps a persistent SSH/SFTP connection, polls every 2s, append-fetches new bytes, and feeds them into the same SSE stream as local sessions.
+- **VS Code–style status bar** with project / branch / entrypoint / session id (click-to-copy) / turn count / token usage / cost / model / provider / live indicator.
+- **Inline review chat.** Per-turn Review button opens a chat thread under the assistant turn — review prompts versioned, evidence toggles, copy-prompt support. Backed by `codex resume` for streaming review sessions.
+- **Next Prompt Coach.** Inline review skill that suggests what to ask Claude next based on the current turn.
+- **Export** — full transcript or "prompts only" (numbered list of your inputs) as Markdown.
 
 ---
 
@@ -53,14 +66,12 @@ Uses the OAuth/subscription you already have in `claude` and/or `codex` CLIs.
 | `codex` CLI ≥ 0.128, signed in (optional) | Faster translate via ChatGPT subscription |
 | `wsl` (optional) | One-click WSL distro discovery |
 
-The watcher does not need an internet connection except when an action
-delegates to `claude` / `codex` (which themselves authenticate to Anthropic /
-OpenAI).
+The watcher does not need an internet connection except when an action delegates to `claude` / `codex` (which themselves authenticate to Anthropic / OpenAI).
 
 ### Install
 
 ```bash
-git clone <this-repo> claude-watcher
+git clone https://github.com/satabd/claude-watch.git claude-watcher
 cd claude-watcher
 
 # Backend
@@ -85,30 +96,21 @@ Production (single process serves both API and built UI):
 
 Open `http://localhost:8765`.
 
-There are also `start.bat` (Windows) and `start.sh` (Unix-y) wrappers that
-do the same with sensible defaults, plus `dev.bat` that runs the backend +
-Vite dev server in two windows for fast iteration.
+There are also `start.bat` (Windows) and `start.sh` (Unix-y) wrappers that do the same with sensible defaults, plus `dev.bat` that runs the backend + Vite dev server in two windows for fast iteration.
 
 ### Configure providers (one time)
 
 1. Open Settings (gear icon).
-2. Pick **Claude** (default, ~13–17 s per translation) or **ChatGPT/Codex**
-   (~8–11 s, requires `codex` CLI ≥ 0.128 and a ChatGPT subscription).
+2. Pick **Claude** (default, ~13–17 s per translation) or **ChatGPT/Codex** (~8–11 s, requires `codex` CLI ≥ 0.128 and a ChatGPT subscription).
 3. Translation cache is shared across providers.
 
 ### Add a WSL or remote machine (optional)
 
-1. Settings → Remote SSH hosts → **Discover WSL** (auto-finds your distros)
-   *or* **Add host** for any SSH-reachable box.
-2. **Test** → verifies auth + locates `~/.claude/projects/` + reports
-   bucket count.
-3. **Sync now** for the first sync; from then on the watcher tails it
-   live with the same latency as a local session (~2 s).
+1. Settings → Remote SSH hosts → **Discover WSL** (auto-finds your distros) *or* **Add host** for any SSH-reachable box.
+2. **Test** → verifies auth + locates `~/.claude/projects/` + reports bucket count.
+3. **Sync now** for the first sync; from then on the watcher tails it live with the same latency as a local session (~2 s).
 
-For WSL specifically, `Discover WSL` reads the configured port from
-`sshd_config` (e.g. `Port 2222`), detects the username via `whoami`,
-and pre-fills the right `host=127.0.0.1` (since WSL2 forwards localhost
-IPv4 only — `localhost` would bind to IPv6 by default and time out).
+For WSL specifically, `Discover WSL` reads the configured port from `sshd_config` (e.g. `Port 2222`), detects the username via `whoami`, and pre-fills the right `host=127.0.0.1` (since WSL2 forwards localhost IPv4 only — `localhost` would bind to IPv6 by default and time out).
 
 ---
 
@@ -124,6 +126,7 @@ IPv4 only — `localhost` would bind to IPv6 by default and time out).
 | Selection → 🪄 **Turn into prompt** | Open Prompt Writer with that text as `selected` |
 | ⇧ on session toolbar | Per-tool/role filter chips |
 | Settings → Provider chip | Switch Claude ⇄ Codex |
+| **Review** on a turn | Inline review chat under that turn |
 
 ---
 
@@ -137,7 +140,7 @@ IPv4 only — `localhost` would bind to IPv6 by default and time out).
 ~/.claude/watcher/
   ├── cache.sqlite             watcher's data (translations, scratchpad,
   │                            prompt drafts, summaries, remote_hosts,
-  │                            settings)
+  │                            settings, review threads/messages)
   └── remotes/<host_name>/     append-only mirrors of remote ~/.claude/projects/
         └── <bucket>/<session>.jsonl
 ```
@@ -203,11 +206,15 @@ server/
 ├── wsl.py                 wsl --list discovery + sshd_config probing
 ├── actions.py             Translate / clarify / summarize / explain /
 │                          glossary / prompt-writer / refine prompts
+├── review_packet.py       Evidence packet builder for Review threads
+├── review_skills.py       Versioned review skills (Next Prompt Coach, etc.)
+├── git_capture.py         Capture git state for review evidence
 ├── providers/             { claude, codex } x { fast, smart } subprocess wrappers
 ├── routes/                FastAPI routers (projects, stream, actions,
-│                          settings, prompt_writer, remotes)
+│                          settings, prompt_writer, remotes, reviews)
 └── db.py                  SQLite (translations, scratchpad, summaries,
-                           prompt_drafts, remote_hosts, settings)
+                           prompt_drafts, remote_hosts, settings,
+                           review threads + messages)
 
 web/
 ├── index.html
@@ -240,7 +247,8 @@ web/
             │                             Filters, Stats popover, Export
             ├── selection-toolbar.tsx     hover popover on text selection
             ├── turn.tsx                  per-turn render + translate toggle
-            └── tool-card.tsx             collapsible tool_use card
+            ├── tool-card.tsx             collapsible tool_use card
+            └── review/                   inline Review chat panel
 ```
 
 ### Database schema
@@ -264,26 +272,26 @@ SQLite at ~/.claude/watcher/cache.sqlite:
                status, last_poll_ms, last_event_ms, next_retry_ms,
                created_at, updated_at)
 
+  review_threads(id, bucket, session_id, source_event_uuid, skill, prompt_version,
+                 provider_session_id, created_at, updated_at)
+
+  review_messages(id, thread_id, role, content, model, created_at)
+
   settings(key PK, value)
 ```
 
-All schema changes use additive `ALTER TABLE ... ADD COLUMN` migrations on
-startup (idempotent — safe to run on a fresh DB or one with prior columns).
+All schema changes use additive `ALTER TABLE ... ADD COLUMN` migrations on startup (idempotent — safe to run on a fresh DB or one with prior columns).
 
 ### Provider abstraction
 
-`server/providers/__init__.py` exposes `resolve(provider, tier)` returning a
-function `run(prompt, *, model=None) -> (text, model_used)`. Two providers
-ship today:
+`server/providers/__init__.py` exposes `resolve(provider, tier)` returning a function `run(prompt, *, model=None) -> (text, model_used)`. Two providers ship today:
 
 | Provider | CLI | Auth | Notes |
 |---|---|---|---|
 | `claude` | `claude -p --model …` | OAuth | Default. `claude-haiku-4-5` for fast tier, `claude-sonnet-4-6` for smart. |
 | `codex` | `codex exec` | ChatGPT | Adds `-c model_reasoning_effort="low" -c web_search="disabled"` for ~33% speed-up. Parses output from stderr (the codex CLI's structured response channel since v0.128). |
 
-Adding a third provider = a new `providers/<name>_provider.py` exposing an
-async `run(...)` plus an entry in `PROVIDERS` and `DEFAULT_MODELS`. No
-other layer cares.
+Adding a third provider = a new `providers/<name>_provider.py` exposing an async `run(...)` plus an entry in `PROVIDERS` and `DEFAULT_MODELS`. No other layer cares.
 
 ### Configurable poll intervals
 
@@ -316,15 +324,22 @@ INFO  remote-watcher tunables: active=2.0s idle_max=10.0s ramp_after=10 full_sca
 
 ---
 
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the dev workflow (live-reload backend + Vite dev server), the test rule, and the architectural background — including the "How sessions actually flow across machines" investigation that motivated the multi-host SSH support and the `ssh-<session_id>` cache analysis.
+
+Project reference docs (deep dive on internals): [docs/PROJECT_REFERENCE.md](docs/PROJECT_REFERENCE.md).
+
+Issues and PRs welcome — especially around new providers, additional review skills, and remote-host platforms beyond WSL/Linux.
+
+---
+
 ## License
 
-Personal-use code. No license declared yet.
+[MIT](LICENSE) — see the LICENSE file for the full text. You are free to use, modify, and redistribute this software with attribution.
 
 ---
 
 ## Acknowledgments
 
-Built to scratch a specific itch: "why doesn't my Claude Watcher show the
-same sessions as Claude Desktop's sidebar?" The investigation that produced
-the multi-host SSH support and the `ssh-<session_id>` cache analysis is
-discussed in CONTRIBUTING.md → "How sessions actually flow across machines".
+Built to scratch a specific itch: "why doesn't my Claude Watcher show the same sessions as Claude Desktop's sidebar?" The investigation that produced the multi-host SSH support and the `ssh-<session_id>` cache analysis is discussed in [CONTRIBUTING.md](CONTRIBUTING.md) → "How sessions actually flow across machines".
