@@ -94,6 +94,32 @@ export interface SessionFull {
 
 const base = ""; // proxied through Vite
 
+/** Error from a non-2xx API response. `detail` carries the parsed FastAPI
+ *  detail payload (object or string) when the body was JSON, so callers can
+ *  branch on structured flags instead of string-matching; `message` prefers
+ *  the human-readable reason over the raw body. */
+export class ApiError extends Error {
+  status: number;
+  detail: unknown;
+  constructor(status: number, statusText: string, body: string) {
+    let detail: unknown = null;
+    let msg = `${status} ${statusText}: ${body}`;
+    try {
+      const parsed = JSON.parse(body);
+      detail = parsed?.detail ?? parsed;
+      const d: any = detail;
+      const reason =
+        typeof d === "string" ? d : d?.reason ?? d?.message ?? null;
+      if (typeof reason === "string" && reason) msg = reason;
+    } catch {
+      /* non-JSON body — keep raw message */
+    }
+    super(msg);
+    this.status = status;
+    this.detail = detail;
+  }
+}
+
 async function jsonFetch<T>(url: string, init?: RequestInit): Promise<T> {
   const res = await fetch(base + url, {
     headers: { "content-type": "application/json" },
@@ -101,7 +127,7 @@ async function jsonFetch<T>(url: string, init?: RequestInit): Promise<T> {
   });
   if (!res.ok) {
     const txt = await res.text();
-    throw new Error(`${res.status} ${res.statusText}: ${txt}`);
+    throw new ApiError(res.status, res.statusText, txt);
   }
   return res.json() as Promise<T>;
 }
@@ -265,7 +291,99 @@ export const api = {
       method: "POST",
       body: JSON.stringify(req),
     }),
+
+  // --- Zellij runtime control -------------------------------------------
+  runtimeState: (bucket: string, sessionId: string) =>
+    jsonFetch<RuntimeState>(`/api/runtime/${bucket}/${sessionId}/state`),
+  runtimeControl: (bucket: string, sessionId: string, allowTakeover: boolean) =>
+    jsonFetch<RuntimeState>(`/api/runtime/${bucket}/${sessionId}/control`, {
+      method: "POST",
+      body: JSON.stringify({ allow_takeover: allowTakeover }),
+    }),
+  pendingList: (bucket: string, sessionId: string) =>
+    jsonFetch<{ pending: PendingPrompt[] }>(
+      `/api/runtime/${bucket}/${sessionId}/pending`
+    ).then((d) => d.pending),
+  pendingCreate: (bucket: string, sessionId: string, text: string) =>
+    jsonFetch<PendingPrompt>(`/api/runtime/${bucket}/${sessionId}/pending`, {
+      method: "POST",
+      body: JSON.stringify({ text }),
+    }),
+  pendingEdit: (id: number, text: string) =>
+    jsonFetch<PendingPrompt>(`/api/runtime/pending/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify({ text }),
+    }),
+  pendingDelete: (id: number) =>
+    jsonFetch<{ ok: boolean }>(`/api/runtime/pending/${id}`, {
+      method: "DELETE",
+    }),
+  pendingSend: (bucket: string, sessionId: string, id: number) =>
+    jsonFetch<{ ok: boolean; id: number }>(
+      `/api/runtime/${bucket}/${sessionId}/pending/${id}/send`,
+      { method: "POST" }
+    ),
+  runtimeInterrupt: (bucket: string, sessionId: string) =>
+    jsonFetch<{ ok: boolean }>(`/api/runtime/${bucket}/${sessionId}/interrupt`, {
+      method: "POST",
+    }),
+  runtimeRespond: (bucket: string, sessionId: string, choice: string) =>
+    jsonFetch<{ ok: boolean }>(`/api/runtime/${bucket}/${sessionId}/respond`, {
+      method: "POST",
+      body: JSON.stringify({ choice }),
+    }),
+  runtimeSetMode: (bucket: string, sessionId: string, mode: PermissionMode) =>
+    jsonFetch<{ ok: boolean; mode: PermissionMode }>(
+      `/api/runtime/${bucket}/${sessionId}/mode`,
+      { method: "POST", body: JSON.stringify({ mode }) }
+    ),
 };
+
+/** Claude's permission modes. `manual`/`accept_edits`/`plan` are reachable
+ *  from the TUI's Shift+Tab cycle; `auto`/`dont_ask`/`bypass` are launch-time
+ *  `--permission-mode` choices we can display but not switch into. */
+export type PermissionMode =
+  | "manual"
+  | "accept_edits"
+  | "plan"
+  | "auto"
+  | "dont_ask"
+  | "bypass";
+
+export interface RuntimeState {
+  state: "managed" | "external_idle" | "external_busy" | "inactive" | "resumable";
+  controllable: boolean;
+  reason: string | null;
+  zellij_session: string | null;
+  pane_id: string | null;
+  external_pid: number | null;
+  busy: boolean;
+  /** Present when the managed claude TUI is blocked on an interactive
+   *  dialog (permission prompt / question with numbered options). */
+  awaiting_input: {
+    question: string;
+    options: { n: string; label: string }[];
+  } | null;
+  /** Permission mode read from the managed TUI's status line. */
+  mode: PermissionMode | null;
+  mode_label: string | null;
+  /** True while a turn is in flight — read live from the pane, so it
+   *  reacts immediately rather than lagging behind JSONL writes. */
+  working: boolean;
+  /** Live spinner text from the TUI while working. */
+  activity: { verb: string; elapsed_s: number; detail: string | null } | null;
+}
+
+export interface PendingPrompt {
+  id: number;
+  bucket: string;
+  session_id: string;
+  text: string;
+  status: string;
+  created_ms: number;
+  updated_ms: number;
+  sent_ms: number | null;
+}
 
 export interface WslDistroInfo {
   name: string;

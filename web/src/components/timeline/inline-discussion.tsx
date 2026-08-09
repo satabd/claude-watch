@@ -178,11 +178,12 @@ export function InlineDiscussion({
       setComposer("");
     } catch (e: unknown) {
       const msg = String((e as { message?: string })?.message ?? "Send failed");
-      if (msg.startsWith("422")) {
+      const status = (e as { status?: number })?.status;
+      if (status === 422) {
         toast.error(
           "Couldn't validate the request. Try rephrasing or simplifying.",
         );
-      } else if (msg.includes("SECRET_DETECTED") || msg.startsWith("409")) {
+      } else if (msg.includes("SECRET_DETECTED") || status === 409) {
         toast.error(
           "Secret-like value detected. Edit the message or use the full panel for override.",
         );

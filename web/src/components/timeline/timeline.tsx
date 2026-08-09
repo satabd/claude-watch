@@ -3,6 +3,7 @@ import { useApp } from "@/store/app";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Turn } from "./turn";
+import { Composer } from "./composer";
 import { SelectionToolbar } from "./selection-toolbar";
 import { SessionToolbar } from "./session-toolbar";
 import type { ToolResult } from "@/lib/api";
@@ -146,7 +147,14 @@ export function Timeline() {
       if (!e.user_text) return false;
       if (!filterRoles.user) return false;
     } else if (e.type === "assistant") {
-      if (!(e.text_blocks.length > 0 || e.tool_uses.length > 0)) return false;
+      if (
+        !(
+          e.text_blocks.length > 0 ||
+          e.tool_uses.length > 0 ||
+          e.thinking_blocks.length > 0
+        )
+      )
+        return false;
       if (!filterRoles.assistant) return false;
     } else if (e.type === "pr-link") {
       // pr-link rides with assistant role
@@ -160,6 +168,8 @@ export function Timeline() {
         (e.user_text || "") +
         " " +
         e.text_blocks.join(" ") +
+        " " +
+        e.thinking_blocks.join(" ") +
         " " +
         e.tool_uses
           .map((t) => `${t.name} ${JSON.stringify(t.input || {})}`)
@@ -182,6 +192,9 @@ export function Timeline() {
             <div className="p-8 text-center text-sm text-muted-foreground">
               This session has no rendered messages yet.
             </div>
+          )}
+          {selectedBucket && selectedSessionId && (
+            <Composer bucket={selectedBucket} sessionId={selectedSessionId} />
           )}
         </div>
       </ScrollArea>

@@ -425,13 +425,14 @@ export function ReviewPanel() {
       toast.success("Reviewer replied");
     } catch (e: any) {
       // 409 SECRET_DETECTED carries hits — surface them and let the user
-      // either edit or override.
+      // either edit or override. jsonFetch throws ApiError with a numeric
+      // `status`, so match on that (the message no longer embeds the code).
       const msg = String(e?.message ?? "");
-      if (msg.includes("SECRET_DETECTED") || msg.startsWith("409")) {
+      if (msg.includes("SECRET_DETECTED") || e?.status === 409) {
         toast.error(
           "Secret-like values detected. Toggle override or remove the offending evidence.",
         );
-      } else if (msg.startsWith("422")) {
+      } else if (e?.status === 422) {
         // Backend pydantic validation rejected something. Replace the raw
         // JSON-shaped error with a friendly hint. The default-question
         // substitution should keep us out of this branch in practice.

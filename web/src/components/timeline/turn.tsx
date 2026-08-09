@@ -12,6 +12,8 @@ import {
   MessageCircle,
   Wand2,
   ClipboardCheck,
+  Brain,
+  ChevronRight,
 } from "lucide-react";
 import { InlineDiscussion } from "./inline-discussion";
 import { Badge } from "@/components/ui/badge";
@@ -32,7 +34,8 @@ export function Turn({ event, toolResultsById }: Props) {
   const isUser = event.role === "user";
   const isAssistant = event.role === "assistant";
   const text = isUser ? event.user_text ?? "" : event.text_blocks.join("\n\n");
-  const hasContent = !!text || event.tool_uses.length > 0;
+  const thinking = isAssistant ? event.thinking_blocks.filter(Boolean) : [];
+  const hasContent = !!text || event.tool_uses.length > 0 || thinking.length > 0;
   if (!hasContent) return null;
 
   return (
@@ -46,6 +49,7 @@ export function Turn({ event, toolResultsById }: Props) {
       <Avatar role={event.role} />
       <div className="min-w-0 flex-1">
         <TurnHeader event={event} />
+        {thinking.length > 0 && <ReasoningBlock blocks={thinking} />}
         {text && <TurnBody text={text} uuid={event.uuid} role={event.role} />}
         {isAssistant && event.tool_uses.length > 0 && (
           <div className="mt-1.5">
@@ -99,6 +103,40 @@ function TurnHeader({ event }: { event: TranscriptEvent }) {
       )}
       {event.is_sidechain && <Badge variant="warning">subagent</Badge>}
       <span className="text-muted-foreground">{formatTime(event.timestamp)}</span>
+    </div>
+  );
+}
+
+/** Collapsible reasoning ("thinking") for an assistant turn. Collapsed
+ *  by default so the timeline stays scannable; the full chain-of-thought
+ *  expands on click. Rendered as plain pre-wrapped text (not markdown) to
+ *  preserve the model's own line breaks and avoid heavy formatting. */
+function ReasoningBlock({ blocks }: { blocks: string[] }) {
+  const [open, setOpen] = React.useState(false);
+  const joined = blocks.join("\n\n").trim();
+  if (!joined) return null;
+  return (
+    <div className="mb-1.5">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className="inline-flex items-center gap-1 rounded-md border border-amber-500/25 bg-amber-500/10 px-2 py-0.5 text-[11px] text-amber-700 transition-colors hover:bg-amber-500/15 dark:text-amber-300"
+        title={open ? "Hide reasoning" : "Show reasoning"}
+      >
+        <ChevronRight
+          className={cn("h-3 w-3 transition-transform", open && "rotate-90")}
+        />
+        <Brain className="h-3 w-3" />
+        Reasoning
+      </button>
+      {open && (
+        <div
+          dir="auto"
+          className="mt-1 whitespace-pre-wrap break-words rounded-md border border-amber-500/20 bg-amber-500/5 px-3 py-2 text-[13px] leading-relaxed text-muted-foreground"
+        >
+          {joined}
+        </div>
+      )}
     </div>
   );
 }

@@ -127,8 +127,8 @@ def test_cascade_delete_messages_when_thread_deleted(isolated_db):
     assert db.list_review_messages(t["id"]) == []
 
 
-def test_schema_is_at_v5(isolated_db):
-    assert db.schema_version() == 5
+def test_schema_is_at_v6(isolated_db):
+    assert db.schema_version() == 6
 
 
 def test_skill_metadata_round_trips(isolated_db):

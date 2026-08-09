@@ -17,7 +17,7 @@ from pathlib import Path  # noqa: E402
 
 from fastapi import FastAPI  # noqa: E402
 from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
-from fastapi.responses import FileResponse  # noqa: E402
+from fastapi.responses import FileResponse, JSONResponse  # noqa: E402
 from fastapi.staticfiles import StaticFiles  # noqa: E402
 
 from . import db  # noqa: E402
@@ -28,6 +28,7 @@ from .routes import (  # noqa: E402
     prompt_writer,
     remotes as remotes_routes,
     reviews as reviews_routes,
+    runtime as runtime_routes,
     settings as settings_routes,
 )
 from .routes import stream as stream_routes  # noqa: E402
@@ -69,6 +70,7 @@ app.include_router(settings_routes.router)
 app.include_router(prompt_writer.router)
 app.include_router(remotes_routes.router)
 app.include_router(reviews_routes.router)
+app.include_router(runtime_routes.router)
 app.include_router(stream_routes.make_router(watcher_service))
 
 
@@ -86,9 +88,21 @@ if WEB_DIST.exists():
     def index():
         return FileResponse(str(WEB_DIST / "index.html"))
 
-    @app.get("/{full_path:path}")
-    def spa_fallback(full_path: str):
-        # SPA fallback: anything not /api or /sse → index.html
-        if full_path.startswith(("api/", "sse/")):
-            return {"error": "not found"}
+    # Unknown /api and /sse paths must 404 as JSON for EVERY method. Without
+    # this, a POST to an endpoint the running build doesn't have (stale
+    # server, older deploy) matched only the GET-only SPA fallback below and
+    # surfaced in the UI as a baffling "405 Method Not Allowed" instead of a
+    # clear 404. Registered before the catch-all so it wins.
+    @app.api_route(
+        "/{api_path:path}",
+        methods=["GET", "POST", "PUT", "PATCH", "DELETE"],
+        include_in_schema=False,
+    )
+    def api_not_found(api_path: str):
+        if api_path.startswith(("api/", "sse/")):
+            return JSONResponse(
+                {"detail": {"reason": f"No such endpoint: /{api_path}"}},
+                status_code=404,
+            )
+        # SPA fallback: any other path → index.html
         return FileResponse(str(WEB_DIST / "index.html"))

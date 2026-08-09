@@ -223,6 +223,41 @@ def _migration_v5(conn: sqlite3.Connection) -> None:
         _safe_alter(conn, stmt)
 
 
+# v6 — Zellij runtime control. `runtime_bindings` maps a Claude session id
+# (permanent identity) to its current disposable Zellij runtime; rows are
+# verified against `zellij list-sessions` on every use and deleted when
+# stale. `pending_prompts` holds composer drafts server-side so they survive
+# reloads and so the send transition can be made atomic (the UPDATE ...
+# WHERE status='pending' rowcount check is the double-send guard).
+def _migration_v6(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS runtime_bindings (
+            claude_session_id TEXT PRIMARY KEY,
+            zellij_session TEXT NOT NULL,
+            pane_id TEXT NOT NULL,
+            cwd TEXT,
+            created_ms INTEGER NOT NULL,
+            last_verified_ms INTEGER
+        )"""
+    )
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS pending_prompts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            bucket TEXT NOT NULL,
+            session_id TEXT NOT NULL,
+            text TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending',
+            created_ms INTEGER NOT NULL,
+            updated_ms INTEGER NOT NULL,
+            sent_ms INTEGER
+        )"""
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_pending_prompts_session "
+        "ON pending_prompts (bucket, session_id, status)"
+    )
+
+
 # Ordered list of (version, sql_or_callable, description). The last entry's
 # version number IS the current schema version.
 MIGRATIONS: list[tuple[int, Callable[[sqlite3.Connection], None], str]] = [
@@ -240,6 +275,7 @@ MIGRATIONS: list[tuple[int, Callable[[sqlite3.Connection], None], str]] = [
         "review_threads: add active_skill_id, provider_session_skill_id, "
         "provider_session_skill_version",
     ),
+    (6, _migration_v6, "runtime_bindings + pending_prompts (Zellij control)"),
 ]
 
 
@@ -887,3 +923,128 @@ def list_review_messages(thread_id: int) -> list[dict[str, Any]]:
             (thread_id,),
         ).fetchall()
     return [dict(r) for r in rows]
+
+
+# ---------------------------------------------------------------------------
+# Zellij runtime control (bindings + pending prompts)
+# ---------------------------------------------------------------------------
+
+def runtime_binding_get(claude_session_id: str) -> dict[str, Any] | None:
+    with _lock, _conn() as c:
+        row = c.execute(
+            "SELECT * FROM runtime_bindings WHERE claude_session_id = ?",
+            (claude_session_id,),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def runtime_binding_put(
+    claude_session_id: str, zellij_session: str, pane_id: str, cwd: str | None
+) -> None:
+    now = int(time.time() * 1000)
+    with _lock, _conn() as c:
+        c.execute(
+            "INSERT OR REPLACE INTO runtime_bindings "
+            "(claude_session_id, zellij_session, pane_id, cwd, created_ms, "
+            " last_verified_ms) VALUES (?, ?, ?, ?, ?, ?)",
+            (claude_session_id, zellij_session, pane_id, cwd, now, now),
+        )
+
+
+def runtime_binding_touch(claude_session_id: str) -> None:
+    with _lock, _conn() as c:
+        c.execute(
+            "UPDATE runtime_bindings SET last_verified_ms = ? "
+            "WHERE claude_session_id = ?",
+            (int(time.time() * 1000), claude_session_id),
+        )
+
+
+def runtime_binding_delete(claude_session_id: str) -> None:
+    with _lock, _conn() as c:
+        c.execute(
+            "DELETE FROM runtime_bindings WHERE claude_session_id = ?",
+            (claude_session_id,),
+        )
+
+
+def pending_prompt_add(bucket: str, session_id: str, text: str) -> dict[str, Any]:
+    now = int(time.time() * 1000)
+    with _lock, _conn() as c:
+        cur = c.execute(
+            "INSERT INTO pending_prompts "
+            "(bucket, session_id, text, status, created_ms, updated_ms) "
+            "VALUES (?, ?, ?, 'pending', ?, ?)",
+            (bucket, session_id, text, now, now),
+        )
+        pid = cur.lastrowid
+    return pending_prompt_get(pid)  # type: ignore[return-value]
+
+
+def pending_prompt_get(prompt_id: int) -> dict[str, Any] | None:
+    with _lock, _conn() as c:
+        row = c.execute(
+            "SELECT * FROM pending_prompts WHERE id = ?", (prompt_id,)
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def pending_prompt_list(bucket: str, session_id: str) -> list[dict[str, Any]]:
+    with _lock, _conn() as c:
+        rows = c.execute(
+            "SELECT * FROM pending_prompts "
+            "WHERE bucket = ? AND session_id = ? AND status = 'pending' "
+            "ORDER BY created_ms ASC",
+            (bucket, session_id),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def pending_prompt_update_text(prompt_id: int, text: str) -> bool:
+    """Edit a draft. Only pending prompts are editable."""
+    with _lock, _conn() as c:
+        cur = c.execute(
+            "UPDATE pending_prompts SET text = ?, updated_ms = ? "
+            "WHERE id = ? AND status = 'pending'",
+            (text, int(time.time() * 1000), prompt_id),
+        )
+        return cur.rowcount > 0
+
+
+def pending_prompt_delete(prompt_id: int) -> bool:
+    with _lock, _conn() as c:
+        cur = c.execute(
+            "DELETE FROM pending_prompts WHERE id = ? AND status = 'pending'",
+            (prompt_id,),
+        )
+        return cur.rowcount > 0
+
+
+def pending_prompt_claim(prompt_id: int) -> bool:
+    """Atomically move pending -> sending. False means someone else already
+    claimed/sent it — the double-send guard for UI retries."""
+    with _lock, _conn() as c:
+        cur = c.execute(
+            "UPDATE pending_prompts SET status = 'sending', updated_ms = ? "
+            "WHERE id = ? AND status = 'pending'",
+            (int(time.time() * 1000), prompt_id),
+        )
+        return cur.rowcount > 0
+
+
+def pending_prompt_finish(prompt_id: int, ok: bool) -> None:
+    """sending -> sent on success, sending -> pending on failure (retryable)."""
+    now = int(time.time() * 1000)
+    with _lock, _conn() as c:
+        if ok:
+            c.execute(
+                "UPDATE pending_prompts SET status = 'sent', sent_ms = ?, "
+                "updated_ms = ? WHERE id = ? AND status = 'sending'",
+                (now, now, prompt_id),
+            )
+        else:
+            c.execute(
+                "UPDATE pending_prompts SET status = 'pending', updated_ms = ? "
+                "WHERE id = ? AND status = 'sending'",
+                (now, prompt_id),
+            )
