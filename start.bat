@@ -26,9 +26,11 @@ if not exist "web\dist\index.html" (
 
 echo.
 echo ================================================================
-echo  Claude Watcher running at http://localhost:8765
+echo  Claude Watcher running:
+echo    local : http://localhost:8765
+echo    LAN   : http://^<this-machine-ip^>:8765  (see: ipconfig)
 echo  Press Ctrl-C to stop.
 echo ================================================================
 echo.
 
-.venv\Scripts\python.exe -m uvicorn server.main:app --port 8765 --log-level info
+.venv\Scripts\python.exe -m uvicorn server.main:app --host 0.0.0.0 --port 8765 --log-level info

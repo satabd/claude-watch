@@ -23,13 +23,27 @@ if [ ! -f "web/dist/index.html" ]; then
   (cd web && npm run build)
 fi
 
+# Bind only to the Wi-Fi interface so the server is reachable over Wi-Fi
+# (192.168.0.*) but NOT over Ethernet. Override the device with
+# WIFI_DEV=enX if your Wi-Fi adapter differs (see: networksetup
+# -listallhardwareports). Falls back to 0.0.0.0 (all interfaces) if the
+# Wi-Fi IP can't be resolved.
+WIFI_DEV="${WIFI_DEV:-en1}"
+BIND_HOST=$(ipconfig getifaddr "$WIFI_DEV" 2>/dev/null)
+if [ -z "$BIND_HOST" ]; then
+  echo "WARNING: could not resolve Wi-Fi IP on $WIFI_DEV; binding all interfaces (0.0.0.0)."
+  BIND_HOST=0.0.0.0
+fi
+
 cat <<EOF
 
 ================================================================
- Claude Watcher running at http://localhost:8765
+ Claude Watcher running (Wi-Fi only, $WIFI_DEV):
+   http://${BIND_HOST}:8765
+ Reach it from this Mac at the same URL (not localhost).
  Press Ctrl-C to stop.
 ================================================================
 
 EOF
 
-exec "$PY" -m uvicorn server.main:app --port 8765 --log-level info
+exec "$PY" -m uvicorn server.main:app --host "$BIND_HOST" --port 8765 --log-level info
