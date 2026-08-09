@@ -11,18 +11,17 @@ from __future__ import annotations
 
 import asyncio
 import re
-import shutil
 from dataclasses import dataclass
-from typing import Final
 
-CODEX_BIN: Final = shutil.which("codex") or "codex"
+from ._bin import resolve_bin
+
 TIMEOUT_SECONDS = 120
 REVIEW_TIMEOUT_SECONDS = 240  # reviews are larger; allow longer thinking
 
 
 async def run(prompt: str, *, model: str | None = None) -> tuple[str, str]:
     args = [
-        CODEX_BIN,
+        resolve_bin("codex"),
         "exec",
         "--skip-git-repo-check",
         "-s",
@@ -200,7 +199,7 @@ class CodexResumeFailed(Exception):
 def _build_review_args(
     session_id_in: str | None, model: str | None
 ) -> list[str]:
-    args: list[str] = [CODEX_BIN, "exec"]
+    args: list[str] = [resolve_bin("codex"), "exec"]
     if session_id_in:
         args.extend(["resume", session_id_in])
     args.append("--skip-git-repo-check")

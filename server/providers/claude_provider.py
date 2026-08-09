@@ -2,15 +2,15 @@
 from __future__ import annotations
 
 import asyncio
-import shutil
-from typing import Final
 
-CLAUDE_BIN: Final = shutil.which("claude") or "claude"
+from ._bin import resolve_bin
+
 TIMEOUT_SECONDS = 90
 
 
 async def run(prompt: str, *, model: str | None = None) -> tuple[str, str]:
-    args = [CLAUDE_BIN, "-p"]
+    # Resolved per call, not at import: under launchd the PATH is minimal.
+    args = [resolve_bin("claude"), "-p"]
     if model:
         args += ["--model", model]
     proc = await asyncio.create_subprocess_exec(
