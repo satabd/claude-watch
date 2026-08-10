@@ -258,6 +258,16 @@ def _migration_v6(conn: sqlite3.Connection) -> None:
     )
 
 
+# v7 — remember which Zellij *tab* holds a session's pane. Zellij can report
+# tab names and pane ids, but nothing maps one to the other
+# (`dump-layout` lists panes without their ids), so the only reliable record
+# is the name we chose when we created the tab.
+def _migration_v7(conn: sqlite3.Connection) -> None:
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(runtime_bindings)")}
+    if "tab_name" not in cols:
+        conn.execute("ALTER TABLE runtime_bindings ADD COLUMN tab_name TEXT")
+
+
 # Ordered list of (version, sql_or_callable, description). The last entry's
 # version number IS the current schema version.
 MIGRATIONS: list[tuple[int, Callable[[sqlite3.Connection], None], str]] = [
@@ -276,6 +286,7 @@ MIGRATIONS: list[tuple[int, Callable[[sqlite3.Connection], None], str]] = [
         "provider_session_skill_version",
     ),
     (6, _migration_v6, "runtime_bindings + pending_prompts (Zellij control)"),
+    (7, _migration_v7, "runtime_bindings: add tab_name"),
 ]
 
 
@@ -939,15 +950,19 @@ def runtime_binding_get(claude_session_id: str) -> dict[str, Any] | None:
 
 
 def runtime_binding_put(
-    claude_session_id: str, zellij_session: str, pane_id: str, cwd: str | None
+    claude_session_id: str,
+    zellij_session: str,
+    pane_id: str,
+    cwd: str | None,
+    tab_name: str | None = None,
 ) -> None:
     now = int(time.time() * 1000)
     with _lock, _conn() as c:
         c.execute(
             "INSERT OR REPLACE INTO runtime_bindings "
-            "(claude_session_id, zellij_session, pane_id, cwd, created_ms, "
-            " last_verified_ms) VALUES (?, ?, ?, ?, ?, ?)",
-            (claude_session_id, zellij_session, pane_id, cwd, now, now),
+            "(claude_session_id, zellij_session, pane_id, cwd, tab_name, "
+            " created_ms, last_verified_ms) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (claude_session_id, zellij_session, pane_id, cwd, tab_name, now, now),
         )
 
 

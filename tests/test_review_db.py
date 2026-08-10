@@ -127,8 +127,24 @@ def test_cascade_delete_messages_when_thread_deleted(isolated_db):
     assert db.list_review_messages(t["id"]) == []
 
 
-def test_schema_is_at_v6(isolated_db):
-    assert db.schema_version() == 6
+def test_schema_is_at_v7(isolated_db):
+    assert db.schema_version() == 7
+
+
+def test_runtime_binding_round_trips_tab_name(isolated_db):
+    """v7 added tab_name — zellij never maps a pane id back to its tab, so
+    the name we chose at creation is the only record of where the pane is."""
+    db.runtime_binding_put("sid", "rumailahub", "terminal_2", cwd="/x",
+                           tab_name="rumailahub-a1b2c3d4")
+    row = db.runtime_binding_get("sid")
+    assert row["zellij_session"] == "rumailahub"
+    assert row["tab_name"] == "rumailahub-a1b2c3d4"
+
+
+def test_runtime_binding_tab_name_is_optional(isolated_db):
+    """Adopted panes from the pre-v7 layout have no known tab."""
+    db.runtime_binding_put("sid", "cw-a1b2c3d4", "terminal_1", cwd=None)
+    assert db.runtime_binding_get("sid")["tab_name"] is None
 
 
 def test_skill_metadata_round_trips(isolated_db):

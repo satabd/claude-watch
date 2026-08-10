@@ -20,6 +20,7 @@ import {
   type RuntimeState,
 } from "@/lib/api";
 import { cn } from "@/lib/utils";
+import { useApp } from "@/store/app";
 import { toast } from "sonner";
 
 /** Chat-style composer anchored under the timeline.
@@ -40,7 +41,10 @@ import { toast } from "sonner";
 const DRAFT_SENDING = -1;
 
 export function Composer({ bucket, sessionId }: { bucket: string; sessionId: string }) {
-  const [runtime, setRuntime] = React.useState<RuntimeState | null>(null);
+  // The composer owns the poll loop; the store copy is what the status bar
+  // reads, so there is exactly one `zellij dump-screen` per interval.
+  const runtime = useApp((s) => s.runtime);
+  const setRuntime = useApp((s) => s.setRuntime);
   const [pending, setPending] = React.useState<PendingPrompt[]>([]);
   const [composing, setComposing] = React.useState(false);
   const [draft, setDraft] = React.useState("");
@@ -54,7 +58,7 @@ export function Composer({ bucket, sessionId }: { bucket: string; sessionId: str
 
   const refreshRuntime = React.useCallback(() => {
     api.runtimeState(bucket, sessionId).then(setRuntime).catch(() => setRuntime(null));
-  }, [bucket, sessionId]);
+  }, [bucket, sessionId, setRuntime]);
 
   const refreshPending = React.useCallback(() => {
     api.pendingList(bucket, sessionId).then(setPending).catch(() => {});
@@ -65,9 +69,16 @@ export function Composer({ bucket, sessionId }: { bucket: string; sessionId: str
     setDraft("");
     setEditingId(null);
     setConfirmTakeover(null);
+    // Drop the previous session's runtime immediately: the status bar reads
+    // this, and showing another session's pane for a poll interval would be
+    // worse than showing nothing.
+    setRuntime(null);
     refreshRuntime();
     refreshPending();
-  }, [bucket, sessionId, refreshRuntime, refreshPending]);
+  }, [bucket, sessionId, refreshRuntime, refreshPending, setRuntime]);
+
+  // The status bar outlives this component, so leave nothing behind.
+  React.useEffect(() => () => setRuntime(null), [setRuntime]);
 
   // Poll fast while a managed session is live (so the working indicator and
   // permission dialogs feel immediate), slowly otherwise to keep the cost of

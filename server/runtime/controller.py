@@ -1,7 +1,8 @@
 """Runtime state machine binding Claude sessions to disposable Zellij panes.
 
 Identity model: the Claude session id is the permanent identity. The Zellij
-session (named ``cw-<first 8 of session id>``) and its pane are disposable
+session (named after the *project*, e.g. ``rumailahub``) and the tab/pane
+holding this particular conversation (``rumailahub-<label>``) are disposable
 runtime bindings persisted in SQLite and re-verified on every use — a binding
 is *never* trusted without checking the Zellij session is actually alive.
 Recovery from pane closure / zellij death / machine restart therefore falls
@@ -162,8 +163,9 @@ class RuntimeState:
     reason: str | None = None  # why not controllable / extra context
     zellij_session: str | None = None
     pane_id: str | None = None
-    # `<project>-<session>` as rendered in zellij's tab/pane title.
+    # `<project>-<session>` as rendered in zellij's tab and pane title.
     pane_title: str | None = None
+    zellij_tab: str | None = None
     external_pid: int | None = None
     busy: bool = False
     # Set when the managed TUI is blocked on an interactive dialog
@@ -186,6 +188,7 @@ class RuntimeState:
             "zellij_session": self.zellij_session,
             "pane_id": self.pane_id,
             "pane_title": self.pane_title,
+            "zellij_tab": self.zellij_tab,
             # Ready to paste in a terminal to watch the very same TUI.
             "attach_command": (
                 f"zellij attach {self.zellij_session}"
@@ -580,6 +583,7 @@ class ClaudeRuntimeController:
                         pane_title=next(
                             (p[2] for p in panes if p[0] == binding["pane_id"]), None
                         ),
+                        zellij_tab=binding["tab_name"],
                         busy=(working or busy) and awaiting is None,
                         awaiting_input=awaiting,
                         mode=status.get("mode"),
@@ -609,7 +613,9 @@ class ClaudeRuntimeController:
             ]
             if match:
                 pane_id = match[0][0]
-                db.runtime_binding_put(session_id, candidate, pane_id, cwd=cwd)
+                db.runtime_binding_put(
+                    session_id, candidate, pane_id, cwd=cwd, tab_name=match[0][2]
+                )
                 _log.info(
                     "adopted surviving zellij pane %s/%s for %s",
                     candidate, pane_id, session_id,
@@ -620,6 +626,7 @@ class ClaudeRuntimeController:
                     zellij_session=candidate,
                     pane_id=pane_id,
                     pane_title=match[0][2],
+                    zellij_tab=match[0][2],
                     busy=busy,
                 )
 
@@ -738,7 +745,7 @@ class ClaudeRuntimeController:
             # Don't hand the runtime out until the TUI is actually accepting
             # input — injecting into a booting claude loses the submit Enter.
             await self._wait_tui_ready(name, pane)
-            db.runtime_binding_put(session_id, name, pane, cwd=cwd)
+            db.runtime_binding_put(session_id, name, pane, cwd=cwd, tab_name=tab)
             _log.info(
                 "managed runtime created: session=%s zellij=%s tab=%s pane=%s",
                 session_id, name, tab, pane,
@@ -749,6 +756,7 @@ class ClaudeRuntimeController:
                 zellij_session=name,
                 pane_id=pane,
                 pane_title=tab,
+                zellij_tab=tab,
                 mode=DEFAULT_PERMISSION_MODE,
                 busy=False,
             )

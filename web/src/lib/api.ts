@@ -366,6 +366,10 @@ export interface RuntimeState {
   pane_id: string | null;
   /** `<project>-<session>` as shown on the zellij tab and pane. */
   pane_title: string | null;
+  /** Name of the zellij tab holding the pane. Recorded when the tab is
+   *  created — zellij can list tab names and pane ids but never maps one to
+   *  the other, so this is null for panes adopted from an older layout. */
+  zellij_tab: string | null;
   /** Paste-in-a-terminal command to watch this very pane. */
   attach_command: string | null;
   external_pid: number | null;
