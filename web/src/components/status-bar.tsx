@@ -20,6 +20,7 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
+import { copyText } from "@/lib/clipboard";
 
 export function StatusBar() {
   const session = useApp((s) => s.session);
@@ -38,7 +39,7 @@ export function StatusBar() {
   const copySessionId = async () => {
     if (!sessionId) return;
     try {
-      await navigator.clipboard.writeText(sessionId);
+      await copyText(sessionId);
       setCopied(true);
       setTimeout(() => setCopied(false), 1200);
     } catch {}

@@ -1,13 +1,16 @@
 """Action endpoints: translate, clarify, summarize, explain, glossary, comment."""
 from __future__ import annotations
 
+import logging
 from typing import Literal
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
-from .. import actions, db, providers
+from .. import actions, db, projects, providers, session_summary
 from .settings import get_provider
+
+_log = logging.getLogger("watcher.routes.actions")
 
 router = APIRouter()
 
@@ -182,6 +185,12 @@ class SummarizeRequest(BaseModel):
     transcript: str = Field(..., min_length=1)
     force: bool = False
     provider: str | None = None
+    # Ask the session itself rather than pasting `transcript` into a fresh
+    # claude. Cheaper (the conversation is already in context / cache) and
+    # more accurate (nothing was truncated on the way in). `transcript` is
+    # still required: it is both the cache key and the fallback input.
+    bucket: str | None = None
+    in_session: bool = True
 
 
 @router.post("/api/summarize-session")
@@ -198,11 +207,46 @@ async def summarize_session(req: SummarizeRequest) -> dict:
                 "cached": True,
                 "model": hit["model"],
                 "content_hash": h,
+                "source": "cache",
             }
+
+    if req.in_session and req.bucket:
+        path = projects.find_session(req.bucket, req.session_id)
+        if path:
+            meta = projects.session_meta(path)
+            if meta.remote_name:
+                pass  # control is local-only; fall through to the paste path
+            else:
+                try:
+                    out, source = await session_summary.summarize_in_session(
+                        req.session_id, path, meta.cwd
+                    )
+                    model = f"session:{source}"
+                    db.save_summary(h, req.session_id, out, model)
+                    return {
+                        "summary": out,
+                        "cached": False,
+                        "model": model,
+                        "content_hash": h,
+                        "source": source,
+                    }
+                except session_summary.SummaryUnavailable as e:
+                    _log.info(
+                        "in-session summary unavailable for %s (%s); "
+                        "falling back to transcript",
+                        req.session_id, e,
+                    )
+
     provider = _resolve_provider(req.provider)
     try:
         out, model = await actions.summarize_session(text, provider=provider)
     except RuntimeError as e:
         raise HTTPException(500, str(e))
     db.save_summary(h, req.session_id, out, model)
-    return {"summary": out, "cached": False, "model": model, "content_hash": h}
+    return {
+        "summary": out,
+        "cached": False,
+        "model": model,
+        "content_hash": h,
+        "source": "transcript",
+    }

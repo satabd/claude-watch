@@ -8,9 +8,12 @@ import time
 from server import db
 from server.runtime.controller import (
     find_claude_processes,
+    pane_title,
     parse_blocking_dialog,
     parse_status,
+    project_name,
     session_is_busy,
+    session_label,
     transcript_looks_terminal,
     zellij_session_name,
 )
@@ -222,6 +225,99 @@ def test_no_dialog_when_numbered_list_in_output():
 ❯
 """
     assert parse_blocking_dialog(screen) is None
+
+
+# Captured verbatim from `zellij action dump-screen` on a real claude 2.1.220
+# trust prompt. Two traps live in here: the question is *not* the nearest
+# line above the options ("Security guide" is), and option 1's label wraps.
+TRUST_SCREEN = """\
+ Quick safety check: Is this a project you
+ created or one you trust? (Like your own code,
+ a well-known open source project, or work
+ from your team). If not, take a moment to
+ review what's in this folder first.
+
+ Claude Code'll be able to read, edit, and
+ execute files here.
+
+ Security guide
+
+ ❯ 1. Yes, I trust this folder
+   2. No, exit
+
+ Enter to confirm · Esc to cancel
+"""
+
+
+def test_parse_trust_dialog():
+    d = parse_blocking_dialog(TRUST_SCREEN)
+    assert d is not None
+    assert d["question"].endswith("first.")
+    assert [o["n"] for o in d["options"]] == ["1", "2"]
+    assert d["options"][0]["label"] == "Yes, I trust this folder"
+    # the hint line must not be swallowed into the last option
+    assert d["options"][1]["label"] == "No, exit"
+
+
+def test_parse_dialog_inside_box_border():
+    # Claude frames some dialogs; the border must not hide the options.
+    screen = """\
+╭──────────────────────────────────────────────╮
+│ Do you want to make this edit to parser.py?  │
+│                                              │
+│ ❯ 1. Yes                                     │
+│   2. Yes, allow all edits this session       │
+│   3. No, and tell Claude what to do          │
+│                                              │
+│ Esc to cancel                                │
+╰──────────────────────────────────────────────╯
+"""
+    d = parse_blocking_dialog(screen)
+    assert d is not None
+    assert d["question"] == "Do you want to make this edit to parser.py?"
+    assert [o["label"] for o in d["options"]][0] == "Yes"
+    assert len(d["options"]) == 3
+
+
+def test_no_dialog_when_numbered_list_sits_above_composer_marker():
+    # The composer's bare "❯" is on screen permanently — it must never make a
+    # numbered list in ordinary output look like a selectable dialog.
+    screen = """\
+⏺ Steps:
+  1. Install deps
+  2. Run the server
+────────────────────────────────
+❯
+────────────────────────────────
+  ⏵⏵ auto mode on · ? for shortcuts
+"""
+    assert parse_blocking_dialog(screen) is None
+
+
+# ---------------------------------------------------------------------------
+# Naming: one zellij session per project, one pane per claude session
+# ---------------------------------------------------------------------------
+
+def test_project_name_is_the_folder_name():
+    assert project_name("/Volumes/AI-STUDIO/Projects/rumailahub") == "rumailahub"
+    assert project_name("/Users/sat/Dev/My App!") == "my-app"
+
+
+def test_project_name_falls_back_to_bucket_then_constant():
+    assert project_name(None, "-Users-sat-Dev-rumailahub") == "rumailahub"
+    assert project_name(None, None) == "claude-watch"
+
+
+def test_pane_title_prefers_ai_title_over_session_id():
+    assert (
+        pane_title(SID, "/x/rumailahub", "Fix the login flow")
+        == "rumailahub-fix-the-login-flow"
+    )
+    assert pane_title(SID, "/x/rumailahub", None) == f"rumailahub-{SID[:8]}"
+
+
+def test_session_label_ignores_a_title_that_slugs_to_nothing():
+    assert session_label(SID, "!!!") == SID[:8]
 
 
 # ---------------------------------------------------------------------------

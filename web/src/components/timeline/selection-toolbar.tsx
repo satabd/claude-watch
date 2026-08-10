@@ -4,6 +4,7 @@ import { Button } from "@/components/ui/button";
 import { api } from "@/lib/api";
 import { useApp } from "@/store/app";
 import { toast } from "sonner";
+import { copyText } from "@/lib/clipboard";
 
 const TOTALLY_NEW_MARKER_XYZQ123 = "v3-rewrite";
 
@@ -115,7 +116,7 @@ export function SelectionToolbar({ containerRef }: { containerRef: React.RefObje
 
   const copy = async () => {
     try {
-      await navigator.clipboard.writeText(text);
+      await copyText(text);
       toast.success("Copied");
     } catch {}
     setSel(null);

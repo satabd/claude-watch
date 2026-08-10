@@ -83,10 +83,25 @@ MODE_LABELS = {
     "dont_ask": "Don't ask",
     "bypass": "Bypass permissions",
 }
-# Modes the TUI's Shift+Tab cycle actually visits. The rest (auto, dont_ask,
-# bypass) are launch-time `--permission-mode` choices — we can *display* them
-# but cannot switch into them by cycling.
-CYCLE_MODES = ("manual", "accept_edits", "plan")
+# `--permission-mode` spelling for each of our snake_case keys.
+MODE_CLI_FLAGS = {
+    "manual": "manual",
+    "accept_edits": "acceptEdits",
+    "plan": "plan",
+    "auto": "auto",
+    "dont_ask": "dontAsk",
+    "bypass": "bypassPermissions",
+}
+# Sessions claude-watch starts run in Auto: Claude picks the right permission
+# behaviour per action instead of stopping on every edit, which is what makes
+# a pane driven from a phone/browser usable.
+DEFAULT_PERMISSION_MODE = "auto"
+# Which modes Shift+Tab visits is build- and settings-dependent — `auto` is in
+# the cycle on 2.1.x but was not on older builds. Rather than hardcode a list
+# and refuse everything outside it, set_mode() cycles and re-reads, and only
+# gives up once it has seen the whole loop repeat. `bypass` stays excluded:
+# it is never in the cycle, and silently landing there would be unsafe.
+UNREACHABLE_BY_CYCLING = ("bypass",)
 # Shift+Tab — the key the TUI uses to cycle permission modes.
 BACKTAB = [27, 91, 90]  # ESC [ Z
 
@@ -147,6 +162,8 @@ class RuntimeState:
     reason: str | None = None  # why not controllable / extra context
     zellij_session: str | None = None
     pane_id: str | None = None
+    # `<project>-<session>` as rendered in zellij's tab/pane title.
+    pane_title: str | None = None
     external_pid: int | None = None
     busy: bool = False
     # Set when the managed TUI is blocked on an interactive dialog
@@ -168,6 +185,13 @@ class RuntimeState:
             "reason": self.reason,
             "zellij_session": self.zellij_session,
             "pane_id": self.pane_id,
+            "pane_title": self.pane_title,
+            # Ready to paste in a terminal to watch the very same TUI.
+            "attach_command": (
+                f"zellij attach {self.zellij_session}"
+                if self.zellij_session
+                else None
+            ),
             "external_pid": self.external_pid,
             "busy": self.busy,
             "awaiting_input": self.awaiting_input,
@@ -179,43 +203,165 @@ class RuntimeState:
         }
 
 
+_BOX_CHARS = "│┃┆┊╎║"
+_LEADING_BORDER_RE = re.compile(rf"^[\s{_BOX_CHARS}]*[{_BOX_CHARS}]")
+
+
+def _strip_box(line: str) -> str:
+    """Drop claude's box-drawing frame from both ends of a line.
+
+    Claude renders some dialogs inside a bordered box, so option rows arrive
+    as "│ ❯ 1. Yes                     │". Without stripping the frame the
+    option regex never matches and the dialog reads as "no dialog" — which is
+    what left the UI showing "working" forever.
+
+    Indentation *inside* the frame is deliberately preserved: it is the only
+    thing distinguishing a wrapped option label ("     (shift+tab)") from the
+    next unindented line of chrome.
+    """
+    s = _LEADING_BORDER_RE.sub("", line.rstrip())
+    return s.rstrip(_BOX_CHARS + " \t")
+
+
+# Hints claude prints under a blocking dialog. Any one of them is enough;
+# which appears depends on the dialog kind (permission / trust / plan).
+_DIALOG_HINTS = (
+    "esc to cancel",
+    "enter to confirm",
+    "tab to amend",
+)
+# A selected option row: "❯ 1. Yes". The bare "❯" of the composer must not
+# count — it is on screen at all times.
+_SELECTED_OPTION_RE = re.compile(r"^❯\s*\d+\.")
+# Lines that are chrome, not the question.
+_DECORATION_PREFIXES = ("─", "╌", "│", "╭", "╰", "━", "┃", "·")
+
+
 def parse_blocking_dialog(screen: str) -> dict | None:
     """Detect a claude TUI dialog awaiting a numbered choice.
 
-    Conservative on purpose: only reports when the viewport tail shows at
-    least two numbered options AND the "Esc to cancel" hint that claude
-    renders under its dialogs. Continuation lines (wrapped option text with
-    no number) are folded into the previous option's label. The question is
-    the nearest non-option line above the first option, typically ending
-    with "?" ("Do you want to create ac_signal.py?").
+    Reports only when the viewport tail shows at least two numbered options
+    *and* either one of claude's dialog hint lines or a "❯"-marked selection
+    row — an assistant reply that merely contains a numbered list has
+    neither. Continuation lines (wrapped option text with no number) fold
+    into the previous option's label.
+
+    The question is the nearest line above the first option that ends in "?";
+    that beats "nearest non-decoration line", which on the real trust dialog
+    picks up the "Security guide" footer link sitting between the prose and
+    the options.
     """
-    lines = screen.splitlines()[-25:]
-    if not any("Esc to cancel" in ln for ln in lines):
+    # 40, not 25: at the geometry we force (see zellij.DEFAULT_ROWS) a
+    # permission dialog with a diff preview pushes its hint line well past
+    # 25 rows from the bottom.
+    lines = [_strip_box(ln) for ln in screen.splitlines()[-40:]]
+    lowered = [ln.lower() for ln in lines]
+    has_hint = any(h in ln for ln in lowered for h in _DIALOG_HINTS)
+    has_marker = any(_SELECTED_OPTION_RE.match(ln.strip()) for ln in lines)
+    if not (has_hint or has_marker):
         return None
+
     options: list[dict] = []
-    question: str | None = None
+    first_option_idx: int | None = None
     for i, ln in enumerate(lines):
         m = _DIALOG_OPTION_RE.match(ln)
         if m:
             options.append({"n": m.group(1), "label": m.group(2)})
-            if question is None:
-                # nearest meaningful line above the first option
-                for prev in reversed(lines[:i]):
-                    s = prev.strip()
-                    if s and not s.startswith(("─", "╌", "│", "╭", "╰")):
-                        question = s
-                        break
-        elif options and ln.startswith((" ", "\t")) and ln.strip():
-            s = ln.strip()
-            if "Esc to cancel" not in s and not s.startswith(("─", "╌")):
-                options[-1]["label"] += " " + s
+            if first_option_idx is None:
+                first_option_idx = i
+            continue
+        if not options:
+            continue
+        # A wrapped label is indented under its option row. Anything flush
+        # left (the hint line, the status line, the next chunk of output) or
+        # blank ends the option block, so it can never be glued onto the
+        # last option's label.
+        s = ln.strip()
+        if not s or not ln.startswith((" ", "\t")):
+            break
+        low = s.lower()
+        if s.startswith(_DECORATION_PREFIXES) or any(h in low for h in _DIALOG_HINTS):
+            break
+        options[-1]["label"] += " " + s
     if len(options) < 2:
         return None
+
+    # The question is a *paragraph*, not a line: claude hard-wraps its prose
+    # to the pane width, so "Is this a project you / created or one you
+    # trust? ..." arrives as five lines. Paragraphs are runs of non-blank,
+    # non-decoration lines — the "╌╌╌" rule under a diff preview is what
+    # keeps the diff itself out of the question.
+    paragraphs: list[list[str]] = []
+    for ln in lines[: first_option_idx or 0]:
+        s = ln.strip()
+        if not s or s.startswith(_DECORATION_PREFIXES):
+            paragraphs.append([])
+            continue
+        if not paragraphs:
+            paragraphs.append([])
+        paragraphs[-1].append(s)
+    candidates = [" ".join(p) for p in paragraphs if p]
+    question = next(
+        (c for c in reversed(candidates) if "?" in c),
+        candidates[-1] if candidates else None,
+    )
     return {"question": question or "Claude is asking for input", "options": options}
 
 
-def zellij_session_name(session_id: str) -> str:
+# ---------------------------------------------------------------------------
+# Naming: one zellij session per project, one tab/pane per claude session
+# ---------------------------------------------------------------------------
+
+# Zellij session names end up in `zellij attach <name>`, so keep them to
+# shell-safe characters; anything else collapses to a single dash.
+_UNSAFE_NAME_RE = re.compile(r"[^A-Za-z0-9._-]+")
+
+
+def _slug(text: str, limit: int = 32) -> str:
+    s = _UNSAFE_NAME_RE.sub("-", text.strip()).strip("-._").lower()
+    return s[:limit].rstrip("-._")
+
+
+def project_name(cwd: str | None, bucket: str | None = None) -> str:
+    """The zellij session name for a project — its folder name ("rumailahub").
+
+    Falls back to the last meaningful segment of the encoded bucket when the
+    transcript carries no cwd, and finally to a constant so we never produce
+    an empty (and therefore un-attachable) session name.
+    """
+    if cwd:
+        base = Path(cwd).name or Path(cwd).parent.name
+        if slug := _slug(base):
+            return slug
+    if bucket:
+        # Buckets are cwds with separators flattened to "-"; the tail segment
+        # is the folder name often enough to be a useful label.
+        tail = bucket.rstrip("-").split("-")[-1]
+        if slug := _slug(tail):
+            return slug
+    return "claude-watch"
+
+
+def session_label(session_id: str, title: str | None = None) -> str:
+    """Human-facing name of one claude session inside its project."""
+    if title and (slug := _slug(title, 40)):
+        return slug
+    return session_id[:8]
+
+
+def pane_title(session_id: str, cwd: str | None, title: str | None = None) -> str:
+    """`<project>-<session>` — the tab and pane name the user sees in zellij."""
+    return f"{project_name(cwd)}-{session_label(session_id, title)}"
+
+
+def legacy_session_name(session_id: str) -> str:
+    """Pre-project naming. Still adopted so upgrades don't orphan a runtime."""
     return f"cw-{session_id[:8]}"
+
+
+# Kept as the historical entry point used by tests and older call sites.
+def zellij_session_name(session_id: str, cwd: str | None = None) -> str:
+    return project_name(cwd) if cwd else legacy_session_name(session_id)
 
 
 # ---------------------------------------------------------------------------
@@ -351,11 +497,20 @@ class ClaudeRuntimeController:
     def __init__(self) -> None:
         # Serialize control mutations per session to kill duplicate-request races.
         self._locks: dict[str, asyncio.Lock] = {}
+        # Serialize tab creation *per zellij session*: two claude sessions in
+        # the same project would otherwise both diff `list-panes` around each
+        # other's new pane and could not tell which one is theirs.
+        self._zellij_locks: dict[str, asyncio.Lock] = {}
 
     def _lock_for(self, session_id: str) -> asyncio.Lock:
         if session_id not in self._locks:
             self._locks[session_id] = asyncio.Lock()
         return self._locks[session_id]
+
+    def _zellij_lock_for(self, name: str) -> asyncio.Lock:
+        if name not in self._zellij_locks:
+            self._zellij_locks[name] = asyncio.Lock()
+        return self._zellij_locks[name]
 
     # -- state ---------------------------------------------------------------
 
@@ -365,6 +520,8 @@ class ClaudeRuntimeController:
         jsonl_path: Path,
         *,
         remote_name: str | None = None,
+        cwd: str | None = None,
+        title: str | None = None,
     ) -> RuntimeState:
         if remote_name:
             return RuntimeState(
@@ -386,7 +543,8 @@ class ClaudeRuntimeController:
             return RuntimeState(state="inactive", controllable=False, reason=str(e))
 
         busy = session_is_busy(jsonl_path)
-        name = zellij_session_name(session_id)
+        name = project_name(cwd)
+        want_title = pane_title(session_id, cwd, title)
 
         # 1) Existing binding — verify, never trust.
         binding = db.runtime_binding_get(session_id)
@@ -409,39 +567,59 @@ class ClaudeRuntimeController:
                         pass  # screen introspection is best-effort
                     # The live pane is a better "is it working" signal than
                     # JSONL mtime: it reacts instantly and never lags.
-                    working = bool(status.get("working"))
+                    # A pane blocked on a dialog often *keeps* its spinner and
+                    # "esc to interrupt" hint on screen. Reporting that as
+                    # "working" is what made a session asking a question look
+                    # permanently stuck, so the question always wins.
+                    working = bool(status.get("working")) and awaiting is None
                     return RuntimeState(
                         state="managed",
                         controllable=True,
                         zellij_session=binding["zellij_session"],
                         pane_id=binding["pane_id"],
-                        busy=working or busy,
+                        pane_title=next(
+                            (p[2] for p in panes if p[0] == binding["pane_id"]), None
+                        ),
+                        busy=(working or busy) and awaiting is None,
                         awaiting_input=awaiting,
                         mode=status.get("mode"),
                         working=working,
-                        activity=status.get("activity"),
+                        activity=status.get("activity") if working else None,
                     )
             # Session or pane vanished — invalidate, fall through.
             _log.info("stale runtime binding for %s (zellij=%s)", session_id, state)
             db.runtime_binding_delete(session_id)
             return RuntimeState(state="resumable", controllable=True, busy=busy)
 
-        # 2) Unbound but our named zellij session survives (watch restarted) —
-        #    adopt it if it still has a claude pane.
-        if await zellij.session_state(name) == "alive":
-            panes = await zellij.list_panes(name)
-            claude_panes = [
-                p for p in panes if p[1] == "terminal" and "claude" in p[2].lower()
+        # 2) Unbound but a zellij session of ours survives (watch restarted) —
+        #    adopt the pane that carries this session's title. The project
+        #    session holds one pane per claude session, so matching on the
+        #    exact `<project>-<session>` title is what keeps them apart; the
+        #    legacy per-session `cw-<id8>` layout had only one pane, so any
+        #    claude-looking pane in it is unambiguous.
+        for candidate, exact in ((name, True), (legacy_session_name(session_id), False)):
+            if await zellij.session_state(candidate) != "alive":
+                continue
+            panes = await zellij.list_panes(candidate)
+            match = [
+                p
+                for p in panes
+                if p[1] == "terminal"
+                and (p[2] == want_title if exact else "claude" in p[2].lower())
             ]
-            if claude_panes:
-                pane_id = claude_panes[0][0]
-                db.runtime_binding_put(session_id, name, pane_id, cwd=None)
-                _log.info("adopted surviving zellij session %s for %s", name, session_id)
+            if match:
+                pane_id = match[0][0]
+                db.runtime_binding_put(session_id, candidate, pane_id, cwd=cwd)
+                _log.info(
+                    "adopted surviving zellij pane %s/%s for %s",
+                    candidate, pane_id, session_id,
+                )
                 return RuntimeState(
                     state="managed",
                     controllable=True,
-                    zellij_session=name,
+                    zellij_session=candidate,
                     pane_id=pane_id,
+                    pane_title=match[0][2],
                     busy=busy,
                 )
 
@@ -509,10 +687,11 @@ class ClaudeRuntimeController:
         *,
         allow_takeover: bool = False,
         remote_name: str | None = None,
+        title: str | None = None,
     ) -> RuntimeState:
         async with self._lock_for(session_id):
             state = await self.get_state(
-                session_id, jsonl_path, remote_name=remote_name
+                session_id, jsonl_path, remote_name=remote_name, cwd=cwd, title=title
             )
             if state.state == "managed":
                 return state
@@ -532,18 +711,28 @@ class ClaudeRuntimeController:
                         "session became active again during takeover; aborted"
                     )
 
-            # inactive / resumable / (external now terminated) → build runtime
-            name = zellij_session_name(session_id)
-            await zellij.create_session(name)
-            pane = await zellij.run_pane(
-                name, cwd, ["claude", "--resume", session_id]
-            )
-            # The background-created session comes with a default shell pane
-            # that just steals half the width from the claude TUI — drop it.
+            # inactive / resumable / (external now terminated) → build runtime.
+            # One zellij session per project, one *tab* per claude session:
+            # a tab gives the TUI the session's full width, where a second
+            # pane in a shared tab would halve it and wreck dialog rendering.
+            name = project_name(cwd)
+            tab = pane_title(session_id, cwd, title)
+            async with self._zellij_lock_for(name):
+                await zellij.create_session(name)
+                pane = await zellij.new_tab(
+                    name,
+                    tab,
+                    cwd,
+                    [
+                        "claude",
+                        "--resume",
+                        session_id,
+                        "--permission-mode",
+                        DEFAULT_PERMISSION_MODE,
+                    ],
+                )
             try:
-                for p_id, p_type, p_title in await zellij.list_panes(name):
-                    if p_type == "terminal" and p_id != pane:
-                        await zellij.close_pane(name, p_id)
+                await zellij.rename_pane(name, pane, tab)
             except zellij.ZellijError:
                 pass  # cosmetic only
             # Don't hand the runtime out until the TUI is actually accepting
@@ -551,14 +740,16 @@ class ClaudeRuntimeController:
             await self._wait_tui_ready(name, pane)
             db.runtime_binding_put(session_id, name, pane, cwd=cwd)
             _log.info(
-                "managed runtime created: session=%s zellij=%s pane=%s",
-                session_id, name, pane,
+                "managed runtime created: session=%s zellij=%s tab=%s pane=%s",
+                session_id, name, tab, pane,
             )
             return RuntimeState(
                 state="managed",
                 controllable=True,
                 zellij_session=name,
                 pane_id=pane,
+                pane_title=tab,
+                mode=DEFAULT_PERMISSION_MODE,
                 busy=False,
             )
 
@@ -643,7 +834,7 @@ class ClaudeRuntimeController:
         """
         if target not in MODE_LABELS:
             raise ControlRefused(f"unknown mode {target!r}")
-        if target not in CYCLE_MODES:
+        if target in UNREACHABLE_BY_CYCLING:
             raise ControlRefused(
                 f"{MODE_LABELS[target]} is a launch-time mode "
                 "(--permission-mode); the TUI's Shift+Tab cycle cannot reach "
@@ -664,16 +855,26 @@ class ClaudeRuntimeController:
             if current.get("mode") == target:
                 return target
 
-            for _ in range(5):  # >= one full lap over the known modes
+            # Press-and-verify rather than counting presses: the cycle's
+            # length and order differ between claude builds and settings, so
+            # the stop condition is "target reached" and the give-up
+            # condition is "the cycle repeated without passing through it".
+            seen: list[str] = [current.get("mode") or "?"]
+            for _ in range(8):
                 await zellij.write_bytes(name, pane, BACKTAB)
                 await asyncio.sleep(0.35)
-                now = parse_status(await zellij.dump_screen(name, pane))
-                if now.get("mode") == target:
+                now = parse_status(await zellij.dump_screen(name, pane)).get("mode")
+                if now == target:
                     _log.info("mode set to %s for %s", target, session_id)
                     return target
+                if now and now in seen and len(seen) > 1:
+                    break  # looped all the way round; target isn't in it
+                seen.append(now or "?")
             raise ControlRefused(
-                f"could not reach {MODE_LABELS[target]} mode by cycling "
-                "(this claude build may not offer it)"
+                f"could not reach {MODE_LABELS[target]} mode by cycling — this "
+                f"build's Shift+Tab loop is {' → '.join(seen)}. Restart the "
+                f"session with --permission-mode {MODE_CLI_FLAGS[target]} to "
+                "use it."
             )
 
     async def respond(self, session_id: str, choice: str) -> None:

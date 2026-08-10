@@ -81,7 +81,14 @@ interface AppState {
   setFilterTool: (t: string | null) => void;
 
   // session AI summary
-  summary: { sessionId: string; text: string; model: string; cached: boolean } | null;
+  summary: {
+    sessionId: string;
+    text: string;
+    model: string;
+    cached: boolean;
+    /** "pane" | "resume" | "transcript" | "cache" — how it was produced. */
+    source?: string;
+  } | null;
   setSummary: (s: AppState["summary"]) => void;
   summaryOpen: boolean;
   setSummaryOpen: (b: boolean) => void;

@@ -194,6 +194,10 @@ export const api = {
   summarizeSession: (req: {
     session_id: string;
     transcript: string;
+    /** Lets the server ask the session itself instead of re-sending the
+     *  transcript; `transcript` stays the cache key and the fallback. */
+    bucket?: string;
+    in_session?: boolean;
     force?: boolean;
     provider?: string;
   }) =>
@@ -202,6 +206,9 @@ export const api = {
       cached: boolean;
       model: string;
       content_hash: string;
+      /** Where the answer came from: the live pane, a headless resume of the
+       *  session, the pasted transcript, or the cache. */
+      source: "pane" | "resume" | "transcript" | "cache";
     }>("/api/summarize-session", { method: "POST", body: JSON.stringify(req) }),
 
   // ---- Prompt Writer ----
@@ -339,9 +346,10 @@ export const api = {
     ),
 };
 
-/** Claude's permission modes. `manual`/`accept_edits`/`plan` are reachable
- *  from the TUI's Shift+Tab cycle; `auto`/`dont_ask`/`bypass` are launch-time
- *  `--permission-mode` choices we can display but not switch into. */
+/** Claude's permission modes. Everything except `bypass` is reachable from
+ *  the TUI's Shift+Tab cycle — which modes the cycle actually visits varies
+ *  by claude build, so the server presses-and-verifies rather than assuming,
+ *  and reports what the loop contained if a mode turns out to be missing. */
 export type PermissionMode =
   | "manual"
   | "accept_edits"
@@ -356,6 +364,10 @@ export interface RuntimeState {
   reason: string | null;
   zellij_session: string | null;
   pane_id: string | null;
+  /** `<project>-<session>` as shown on the zellij tab and pane. */
+  pane_title: string | null;
+  /** Paste-in-a-terminal command to watch this very pane. */
+  attach_command: string | null;
   external_pid: number | null;
   busy: boolean;
   /** Present when the managed claude TUI is blocked on an interactive

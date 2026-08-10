@@ -44,7 +44,11 @@ async def runtime_state(bucket: str, session_id: str) -> dict:
     path, meta = _resolve(bucket, session_id)
     try:
         state = await controller.get_state(
-            session_id, path, remote_name=meta.remote_name
+            session_id,
+            path,
+            remote_name=meta.remote_name,
+            cwd=meta.cwd,
+            title=meta.ai_title,
         )
     except zellij.ZellijError as e:
         raise HTTPException(502, f"zellij error: {e}")
@@ -65,6 +69,7 @@ async def take_control(bucket: str, session_id: str, body: ControlBody) -> dict:
             meta.cwd,
             allow_takeover=body.allow_takeover,
             remote_name=meta.remote_name,
+            title=meta.ai_title,
         )
     except TakeoverConfirmationRequired as e:
         # 409 + flag: the UI turns this into an explicit confirmation step.
@@ -142,7 +147,7 @@ async def interrupt(bucket: str, session_id: str) -> dict:
 
 
 class ModeBody(BaseModel):
-    mode: str = Field(pattern=r"^(manual|accept_edits|plan|bypass)$")
+    mode: str = Field(pattern=r"^(manual|accept_edits|plan|auto|dont_ask|bypass)$")
 
 
 @router.post("/api/runtime/{bucket}/{session_id}/mode")

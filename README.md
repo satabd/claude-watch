@@ -127,6 +127,48 @@ For WSL specifically, `Discover WSL` reads the configured port from `sshd_config
 | ⇧ on session toolbar | Per-tool/role filter chips |
 | Settings → Provider chip | Switch Claude ⇄ Codex |
 | **Review** on a turn | Inline review chat under that turn |
+| **Write Prompt** → Cmd-Enter | Send straight into the live Claude pane |
+| **Open in zellij** | Resume the session in a pane you can attach to |
+
+---
+
+## Driving a live session (Zellij runtime)
+
+Claude Watch can do more than mirror a session — it can *drive* it. Sending a
+prompt (or clicking **Open in zellij**) resumes the session as a real
+`claude --resume` TUI inside a [Zellij](https://zellij.dev) pane, then types
+into that pane. Everything you see in the app is the same process you'd see
+if you attached a terminal to it.
+
+**Naming.** One zellij session per project, one tab and pane per Claude
+session:
+
+```
+zellij attach rumailahub          # the project
+└── tab/pane  rumailahub-a1b2c3d4       (or rumailahub-fix-the-login-flow)
+└── tab/pane  rumailahub-9f8e7d6c
+```
+
+The project name is the folder name; the suffix is the session's AI title if
+it has one, otherwise the first 8 characters of its id. The app shows the
+exact `zellij attach …` command next to the runtime status — click to copy.
+
+**Permission mode.** Sessions Claude Watch starts run in `auto`. The mode
+buttons cycle the TUI's Shift+Tab modes and verify after each press, so they
+work regardless of which modes a given `claude` build puts in the loop.
+
+**When Claude asks something** — a permission prompt, a trust check, a plan
+approval — the question and its options are lifted off the pane and rendered
+as buttons under the timeline; answering clicks through the real dialog.
+
+**Summarize** asks the session itself rather than re-uploading the
+transcript, which is both cheaper (the conversation is already in context)
+and more faithful (nothing was truncated on the way in). The summary shows up
+as a turn in the timeline. If nothing is running, it falls back to
+`claude --resume --print`, and then to summarizing the transcript.
+
+> Zellij has no Windows build — runtime control needs macOS, Linux, or WSL.
+> Remote (SSH) sessions are mirror-only for now.
 
 ---
 

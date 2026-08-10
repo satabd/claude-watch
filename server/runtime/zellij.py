@@ -15,6 +15,18 @@ Every quirk in here was verified empirically against zellij 0.44.3:
   target. We always scrub the variable and set it explicitly per call.
 
 * ``zellij run`` prints the created pane id (``terminal_<n>``) on stdout.
+  ``zellij action new-tab`` prints the *tab* id instead, so the pane id of a
+  command started in a new tab has to be recovered by diffing ``list-panes``
+  (pane ids are unique across the whole session, not per tab).
+
+* A session created with ``--create-background`` is **48x46**, whatever the
+  creating process's terminal was — measured, not guessed. Claude Code's TUI
+  wraps catastrophically at 48 columns: the status line loses its mode, and
+  permission dialogs fold into unparseable fragments, which is why the app
+  could not tell "waiting for you" from "working". Zellij has no flag for
+  this, but the session adopts the geometry of any client that attaches, and
+  keeps it after that client leaves — so we attach a throwaway client on a
+  pty sized ``DEFAULT_COLS x DEFAULT_ROWS`` once, right after creation.
 
 * ``action write-chars`` passes text as a single argv element — no shell —
   so quotes, backticks, ``$()``, Arabic and CJK arrive byte-perfect.
@@ -26,8 +38,15 @@ Every quirk in here was verified empirically against zellij 0.44.3:
 from __future__ import annotations
 
 import asyncio
+import fcntl
 import logging
 import os
+import pty
+import signal
+import struct
+import subprocess
+import termios
+import time
 from dataclasses import dataclass
 
 from ..providers._bin import ProviderBinaryNotFound, resolve_bin
@@ -35,6 +54,11 @@ from ..providers._bin import ProviderBinaryNotFound, resolve_bin
 _log = logging.getLogger("watcher.runtime.zellij")
 
 CALL_TIMEOUT_S = 5.0
+# Geometry forced onto every session we create. Wide enough that Claude Code
+# renders its status line and permission dialogs unwrapped; tall enough that
+# the dialog plus its options fit in one dump-screen viewport.
+DEFAULT_COLS = 200
+DEFAULT_ROWS = 50
 # ESC [ 2 0 0 ~ / ESC [ 2 0 1 ~
 _PASTE_START = [27, 91, 50, 48, 48, 126]
 _PASTE_END = [27, 91, 50, 48, 49, 126]
@@ -160,6 +184,70 @@ async def _require_alive(name: str) -> None:
         raise ZellijError(f"zellij session {name!r} is {state}; refusing to target it")
 
 
+def _resize_blocking(name: str, cols: int, rows: int) -> None:
+    """Attach a throwaway client on a sized pty, then drop it.
+
+    This is the only way to give a background session a usable geometry (see
+    the module docstring). The client is killed rather than detached cleanly:
+    a clean detach needs the Ctrl-o d keybinding, which the user may have
+    remapped, whereas SIGHUP/SIGKILL on the client process leaves the
+    *server* — and therefore every pane in it — untouched.
+    """
+    mfd, sfd = pty.openpty()
+    try:
+        fcntl.ioctl(sfd, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
+        env = _env_for(None)
+        env["TERM"] = env.get("TERM") or "xterm-256color"
+        proc = subprocess.Popen(
+            [zellij_bin(), "attach", name],
+            stdin=sfd,
+            stdout=sfd,
+            stderr=sfd,
+            env=env,
+            start_new_session=True,  # never let it grab our controlling tty
+        )
+        # Let the client complete its handshake — the resize only lands once
+        # the server has registered the client's screen size.
+        deadline = time.monotonic() + 3.0
+        os.set_blocking(mfd, False)
+        while time.monotonic() < deadline:
+            time.sleep(0.2)
+            try:
+                if not os.read(mfd, 1 << 16):
+                    break
+            except (BlockingIOError, OSError):
+                pass
+        for sig in (signal.SIGHUP, signal.SIGKILL):
+            if proc.poll() is not None:
+                break
+            try:
+                proc.send_signal(sig)
+            except ProcessLookupError:
+                break
+            try:
+                proc.wait(timeout=2.0)
+            except subprocess.TimeoutExpired:
+                continue
+    finally:
+        for fd in (sfd, mfd):
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+
+
+async def resize_session(
+    name: str, cols: int = DEFAULT_COLS, rows: int = DEFAULT_ROWS
+) -> None:
+    """Best-effort: give `name` a geometry Claude Code's TUI can render into."""
+    try:
+        await asyncio.wait_for(
+            asyncio.to_thread(_resize_blocking, name, cols, rows), timeout=15.0
+        )
+    except Exception as e:  # cosmetic-ish; a narrow session still works
+        _log.warning("could not resize zellij session %s: %s", name, e)
+
+
 async def create_session(name: str) -> None:
     """Create a detached session, clearing any EXITED remnant of the name."""
     state = await session_state(name)
@@ -172,6 +260,7 @@ async def create_session(name: str) -> None:
     await _run(["attach", name, "--create-background"], timeout=10.0)
     if await session_state(name) != "alive":
         raise ZellijError(f"failed to create zellij session {name!r}")
+    await resize_session(name)
 
 
 async def run_pane(name: str, cwd: str | None, command: list[str]) -> str:
@@ -187,6 +276,56 @@ async def run_pane(name: str, cwd: str | None, command: list[str]) -> str:
     if not pane.startswith(("terminal_", "plugin_")):
         raise ZellijError(f"unexpected `zellij run` output: {out[:120]!r}")
     return pane
+
+
+async def query_tab_names(name: str) -> list[str]:
+    await _require_alive(name)
+    raw = await _run(["action", "query-tab-names"], session=name)
+    return [ln.strip() for ln in raw.splitlines() if ln.strip()]
+
+
+async def rename_pane(name: str, pane: str, title: str) -> None:
+    await _require_alive(name)
+    await _run(["action", "rename-pane", "-p", pane, title], session=name)
+
+
+async def new_tab(
+    name: str, tab_name: str, cwd: str | None, command: list[str]
+) -> str:
+    """Open `command` as the sole pane of a new named tab; return the pane id.
+
+    A tab (rather than a pane split) is what makes the geometry usable: a
+    second pane in the same tab halves Claude Code's width, and zellij's
+    first-run "About Zellij" plugin pane can halve it again.
+
+    ``new-tab`` reports the tab id, not the pane id, so the pane is recovered
+    by diffing ``list-panes`` — pane ids are unique session-wide. Callers must
+    serialize concurrent creations within one session or the diff is
+    ambiguous.
+    """
+    await _require_alive(name)
+    before = {p[0] for p in await list_panes(name)}
+    args = ["action", "new-tab", "--name", tab_name]
+    if cwd:
+        args += ["--cwd", cwd]
+    args += ["--", *command]
+    await _run(args, session=name, timeout=15.0)
+
+    # The pane appears a beat after the tab; poll rather than sleep blindly.
+    deadline = time.monotonic() + 10.0
+    while time.monotonic() < deadline:
+        new = [
+            p for p in await list_panes(name)
+            if p[0] not in before and p[0].startswith("terminal_")
+        ]
+        if len(new) == 1:
+            return new[0][0]
+        if len(new) > 1:
+            raise ZellijError(
+                f"ambiguous pane after new-tab in {name!r}: {[p[0] for p in new]}"
+            )
+        await asyncio.sleep(0.25)
+    raise ZellijError(f"tab {tab_name!r} created in {name!r} but no pane appeared")
 
 
 async def list_panes(name: str) -> list[tuple[str, str, str]]:

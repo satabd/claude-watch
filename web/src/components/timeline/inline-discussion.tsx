@@ -49,6 +49,7 @@ import {
   UserMessageView,
 } from "@/components/review-panel/parts/reviewer-message-view";
 import { toast } from "sonner";
+import { copyText } from "@/lib/clipboard";
 
 /** Quick-Review-only evidence: send the Claude turn the user is
  *  reviewing, but no git diff / test output / build output. The full
@@ -128,7 +129,7 @@ export function InlineDiscussion({
       return;
     }
     try {
-      await navigator.clipboard.writeText(prompt.trim());
+      await copyText(prompt.trim());
       toast.success("Copied next prompt");
     } catch {
       toast.error("Clipboard write failed");

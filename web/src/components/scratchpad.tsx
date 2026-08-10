@@ -19,6 +19,7 @@ import {
 } from "lucide-react";
 import { cn, formatRelative } from "@/lib/utils";
 import { toast } from "sonner";
+import { copyText } from "@/lib/clipboard";
 
 const ACTION_META: Record<
   string,
@@ -102,7 +103,7 @@ function ActionCard({
   const isTranslation = item.action === "translate";
   const copy = async () => {
     try {
-      await navigator.clipboard.writeText(item.result);
+      await copyText(item.result);
       toast.success("Copied");
     } catch {}
   };
