@@ -903,6 +903,60 @@ class ClaudeRuntimeController:
             await asyncio.sleep(0.15)
             await zellij.submit(name, pane)
 
+    async def release(self, session_id: str) -> dict:
+        """Close the managed pane and make sure its claude is really gone.
+
+        Closing the pane is the normal way out, but "the pane is gone" is not
+        the same claim as "the process is gone", and the difference matters:
+        a surviving claude keeps appending to the session's transcript from
+        nowhere visible, and the next take-control then refuses because the
+        registry — correctly — reports the session as owned.
+
+        So this verifies against the registry and reaps a survivor with
+        SIGTERM. Never SIGKILL: a claude caught mid-write to its JSONL should
+        be allowed to finish the line.
+        """
+        async with self._lock_for(session_id):
+            binding = db.runtime_binding_get(session_id)
+            if not binding:
+                return {"released": False, "reason": "no managed runtime"}
+            name, pane = binding["zellij_session"], binding["pane_id"]
+
+            if await zellij.session_state(name) == "alive":
+                try:
+                    await zellij.close_pane(name, pane)
+                except zellij.ZellijError as e:
+                    _log.info("close_pane failed during release of %s: %s", session_id, e)
+
+            # Give the TUI a moment to exit on its own before reaching for a
+            # signal — a clean exit flushes; a signal races the flush.
+            reaped: list[int] = []
+            deadline = time.monotonic() + 6.0
+            while time.monotonic() < deadline:
+                if not registry.owners_of(session_id):
+                    break
+                await asyncio.sleep(0.5)
+            for survivor in registry.owners_of(session_id):
+                _log.warning(
+                    "claude %s survived pane close for %s; terminating",
+                    survivor.pid, session_id,
+                )
+                try:
+                    await self._terminate_pid(survivor.pid)
+                    reaped.append(survivor.pid)
+                except ControlRefused as e:
+                    _log.error("could not reap %s: %s", survivor.pid, e)
+
+            db.runtime_binding_delete(session_id)
+            still = [o.pid for o in registry.owners_of(session_id)]
+            return {
+                "released": True,
+                "zellij_session": name,
+                "pane_id": pane,
+                "reaped_pids": reaped,
+                "surviving_pids": still,
+            }
+
     async def interrupt(self, session_id: str) -> None:
         binding = db.runtime_binding_get(session_id)
         if not binding:

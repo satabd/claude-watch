@@ -399,15 +399,51 @@ async def close_pane(name: str, pane: str) -> None:
     await _run(["action", "close-pane", "-p", pane], session=name)
 
 
+async def close_all_terminal_panes(name: str) -> None:
+    """Close every terminal pane, ending the processes running in them.
+
+    Tearing a session down by ``kill-session`` alone usually takes its panes'
+    processes with it, but not dependably — an orphaned ``claude`` outliving
+    its session was observed once, and an orphan keeps writing to the
+    session's transcript where nobody can see it. Closing panes explicitly
+    first is the deterministic path; callers still verify afterwards.
+    """
+    try:
+        panes = await list_panes(name)
+    except ZellijError:
+        return
+    for pane_id, pane_type, _title in panes:
+        if pane_type != "terminal":
+            continue
+        try:
+            await close_pane(name, pane_id)
+        except ZellijError as e:
+            _log.warning("could not close pane %s of %s: %s", pane_id, name, e)
+
+
 async def kill_session(name: str) -> None:
     if await session_state(name) == "alive":
-        await _run(["kill-session", name])
+        await close_all_terminal_panes(name)
+        try:
+            await _run(["kill-session", name])
+        except ZellijError as e:
+            # Closing the last pane can end the session on its own, and then
+            # kill-session has nothing left to kill. That is success.
+            if "not found" not in str(e).lower():
+                raise
 
 
 async def delete_session(name: str) -> None:
-    if await session_state(name) != "missing":
-        try:
-            await _run(["kill-session", name])
-        except ZellijError:
-            pass
+    if await session_state(name) == "missing":
+        return
+    try:
+        await kill_session(name)
+    except ZellijError:
+        pass
+    try:
         await _run(["delete-session", name, "--force"])
+    except ZellijError as e:
+        # Already gone — kill-session removes non-resurrectable sessions
+        # outright. Raising here made routine cleanup look like a failure.
+        if "not found" not in str(e).lower():
+            raise

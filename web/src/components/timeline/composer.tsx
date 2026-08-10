@@ -3,6 +3,7 @@ import {
   Loader2,
   Pencil,
   PenLine,
+  PowerOff,
   Send,
   ShieldAlert,
   SlidersHorizontal,
@@ -196,6 +197,32 @@ export function Composer({ bucket, sessionId }: { bucket: string; sessionId: str
     }
   };
 
+  /** Close the pane and confirm its claude actually exited. */
+  const [releasing, setReleasing] = React.useState(false);
+  const release = async () => {
+    setReleasing(true);
+    try {
+      const r = await api.runtimeRelease(bucket, sessionId);
+      if (r.surviving_pids?.length) {
+        toast.error(
+          `Pane closed, but claude ${r.surviving_pids.join(", ")} is still ` +
+            "running and writing to this transcript."
+        );
+      } else if (r.reaped_pids?.length) {
+        toast.success(
+          `Pane closed (claude ${r.reaped_pids.join(", ")} had to be signalled).`
+        );
+      } else {
+        toast.success("Pane closed");
+      }
+    } catch (e: any) {
+      toast.error(e?.message ?? "Could not close the pane");
+    } finally {
+      setReleasing(false);
+      refreshRuntime();
+    }
+  };
+
   const interrupt = async () => {
     try {
       await api.runtimeInterrupt(bucket, sessionId);
@@ -249,6 +276,22 @@ export function Composer({ bucket, sessionId }: { bucket: string; sessionId: str
           />
         )}
         {runtime?.attach_command && <AttachHint runtime={runtime} />}
+        {runtime?.state === "managed" && (
+          <button
+            type="button"
+            disabled={releasing}
+            onClick={release}
+            className="inline-flex items-center gap-1 rounded-md border border-border px-1.5 py-0.5 text-[11px] text-muted-foreground transition-colors hover:border-red-400/60 hover:text-red-500 disabled:opacity-50"
+            title="Close the zellij pane and stop the claude running in it"
+          >
+            {releasing ? (
+              <Loader2 className="h-3 w-3 animate-spin" />
+            ) : (
+              <PowerOff className="h-3 w-3" />
+            )}
+            Close pane
+          </button>
+        )}
         {runtime !== null &&
           runtime.state !== "managed" &&
           runtime.controllable &&

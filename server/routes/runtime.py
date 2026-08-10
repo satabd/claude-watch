@@ -136,6 +136,16 @@ async def send_pending(bucket: str, session_id: str, prompt_id: int) -> dict:
     return {"ok": True, "id": prompt_id}
 
 
+@router.post("/api/runtime/{bucket}/{session_id}/release")
+async def release(bucket: str, session_id: str) -> dict:
+    """Close the managed pane and verify its claude actually exited."""
+    _resolve(bucket, session_id)
+    try:
+        return await controller.release(session_id)
+    except (ControlRefused, zellij.ZellijError) as e:
+        raise HTTPException(409, detail={"reason": str(e)})
+
+
 @router.post("/api/runtime/{bucket}/{session_id}/interrupt")
 async def interrupt(bucket: str, session_id: str) -> dict:
     _resolve(bucket, session_id)

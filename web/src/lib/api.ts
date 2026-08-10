@@ -339,6 +339,17 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ choice }),
     }),
+  runtimeRelease: (bucket: string, sessionId: string) =>
+    jsonFetch<{
+      released: boolean;
+      reason?: string;
+      zellij_session?: string;
+      pane_id?: string;
+      /** Processes that had to be signalled because closing the pane left
+       *  them running — an orphan keeps writing to the transcript. */
+      reaped_pids?: number[];
+      surviving_pids?: number[];
+    }>(`/api/runtime/${bucket}/${sessionId}/release`, { method: "POST" }),
   runtimeSetMode: (bucket: string, sessionId: string, mode: PermissionMode) =>
     jsonFetch<{ ok: boolean; mode: PermissionMode }>(
       `/api/runtime/${bucket}/${sessionId}/mode`,
