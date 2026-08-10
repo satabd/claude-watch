@@ -40,7 +40,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .. import db
-from . import zellij
+from . import registry, zellij
 
 _log = logging.getLogger("watcher.runtime")
 
@@ -630,7 +630,73 @@ class ClaudeRuntimeController:
                     busy=busy,
                 )
 
-        # 3) External process?
+        # 3) Does a live claude already own this session? Claude Code's own
+        #    registry answers this exactly, including for a plain `claude`
+        #    started with no session flag — the case the argv scan below is
+        #    blind to, and the one that used to let us start a *second*
+        #    claude on the same transcript.
+        owners = registry.owners_of(session_id)
+        if owners:
+            owner = owners[-1]
+            if len(owners) > 1:
+                # Already broken: several claudes are appending to one
+                # transcript. Say so — the pane will look like it is ignoring
+                # the conversation, and no amount of staring at it explains why.
+                pids = ", ".join(str(o.pid) for o in owners)
+                _log.warning(
+                    "session %s has %d live claude owners (pids %s)",
+                    session_id, len(owners), pids,
+                )
+                return RuntimeState(
+                    state="external_busy",
+                    controllable=False,
+                    external_pid=owner.pid,
+                    busy=True,
+                    reason=f"{len(owners)} claude processes (pids {pids}) are "
+                    "driving this session at once, so their writes interleave "
+                    "and neither view is complete. Close all but one, then "
+                    "reload.",
+                    detail={"owner_pids": [o.pid for o in owners]},
+                )
+            # `status` is written on transitions, not on a timer, so it goes
+            # unknown on any session that has been sitting still. Fall back to
+            # the JSONL heuristic there. Either way the session is now
+            # `external_*` rather than `inactive`, so control needs an explicit
+            # takeover — which is the property that actually prevents a
+            # second claude on the same transcript.
+            owner_busy = owner.busy
+            effective_busy = busy if owner_busy is None else owner_busy
+            if not owner.takeoverable:
+                return RuntimeState(
+                    state="external_busy" if effective_busy else "external_idle",
+                    controllable=False,
+                    external_pid=owner.pid,
+                    busy=effective_busy,
+                    reason=f"Session is driven by {owner.describe()}, which is "
+                    "not a terminal claude-watch can take over; monitor-only.",
+                )
+            if effective_busy:
+                return RuntimeState(
+                    state="external_busy",
+                    controllable=False,
+                    external_pid=owner.pid,
+                    busy=True,
+                    reason=f"{owner.describe()} is working on this session; "
+                    "takeover is blocked until it goes idle.",
+                )
+            return RuntimeState(
+                state="external_idle",
+                controllable=True,
+                external_pid=owner.pid,
+                busy=False,
+                reason=f"{owner.describe()} currently owns this session. "
+                "Taking control closes it and resumes the session under "
+                "claude-watch — otherwise two claudes would write to the "
+                "same transcript.",
+            )
+
+        # 4) Fallback for claude builds with no session registry: identify by
+        #    argv. Only catches processes launched with --resume/--session-id.
         for proc in find_claude_processes():
             if proc.resume_id and session_id.startswith(proc.resume_id):
                 if proc.embedded:
@@ -659,7 +725,7 @@ class ClaudeRuntimeController:
                     "and resume the session under claude-watch.",
                 )
 
-        # 4) No identified process. If the session still looks mid-turn an
+        # 5) No identified process. If the session still looks mid-turn an
         #    unidentifiable claude may own it — stay hands-off, but report
         #    which signal tripped so the UI/user can tell why.
         if busy:
@@ -717,6 +783,17 @@ class ClaudeRuntimeController:
                     raise ControlRefused(
                         "session became active again during takeover; aborted"
                     )
+
+            # Last-mile guard. get_state() ran before any awaits above, and a
+            # `claude` can be started by hand in the seconds since. Spawning a
+            # second one is the single most damaging thing this class can do —
+            # two interactive processes appending to one JSONL — so re-ask the
+            # registry immediately before committing.
+            if survivors := registry.owners_of(session_id):
+                raise ControlRefused(
+                    f"{survivors[-1].describe()} owns this session; refusing to "
+                    "start a second claude on the same transcript"
+                )
 
             # inactive / resumable / (external now terminated) → build runtime.
             # One zellij session per project, one *tab* per claude session:
