@@ -725,7 +725,38 @@ class ClaudeRuntimeController:
                     "and resume the session under claude-watch.",
                 )
 
-        # 5) No identified process. If the session still looks mid-turn an
+        # 5) Nothing *names* this session, but an unregistered claude may
+        #    still be driving it. One that inherited CLAUDE_* env writes no
+        #    registry record, and started as a plain `claude` it has no argv
+        #    flag either — invisible to both checks above, which is exactly
+        #    how a second claude once got spawned onto this transcript. Only
+        #    its directory is knowable, so a match there means "unknown", not
+        #    "free": refuse rather than resume.
+        #
+        #    Not offered as a takeover: we cannot tell which session that
+        #    process holds, so terminating it could close a different one.
+        if unknown := registry.unidentified_claudes(cwd):
+            pids = ", ".join(str(u.pid) for u in unknown)
+            _log.info(
+                "session %s: %d unregistered claude(s) in %s (pids %s)",
+                session_id, len(unknown), cwd, pids,
+            )
+            return RuntimeState(
+                state="external_idle",
+                controllable=False,
+                external_pid=unknown[0].pid,
+                busy=busy,
+                reason=(
+                    f"An unregistered claude (pid {pids}) is running in this "
+                    "project. It publishes no session id, so claude-watch "
+                    "cannot tell whether it is driving this session — and "
+                    "resuming anyway would put two claudes on one transcript. "
+                    "Close it (or start it in its own terminal) and reload."
+                ),
+                detail={"unregistered_pids": [u.pid for u in unknown]},
+            )
+
+        # 6) No identified process. If the session still looks mid-turn an
         #    unidentifiable claude may own it — stay hands-off, but report
         #    which signal tripped so the UI/user can tell why.
         if busy:
@@ -793,6 +824,13 @@ class ClaudeRuntimeController:
                 raise ControlRefused(
                     f"{survivors[-1].describe()} owns this session; refusing to "
                     "start a second claude on the same transcript"
+                )
+            if unknown := registry.unidentified_claudes(cwd):
+                raise ControlRefused(
+                    f"{unknown[0].describe()} is running in this project and "
+                    "publishes no session id, so it may be driving this "
+                    "session; refusing to start a second claude on the same "
+                    "transcript"
                 )
 
             # inactive / resumable / (external now terminated) → build runtime.
