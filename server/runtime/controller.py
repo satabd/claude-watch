@@ -35,6 +35,7 @@ import signal
 import subprocess
 import sys
 import time
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -852,6 +853,62 @@ class ClaudeRuntimeController:
                 session_id, name, tab, pane, pid,
             )
             return RuntimeState(
+                state="managed",
+                controllable=True,
+                zellij_session=name,
+                pane_id=pane,
+                pane_title=tab,
+                zellij_tab=tab,
+                external_pid=pid,
+                mode=DEFAULT_PERMISSION_MODE,
+                busy=False,
+            )
+
+    async def create_session(
+        self, cwd: str, *, title: str | None = None
+    ) -> tuple[str, RuntimeState]:
+        """Start a brand-new Claude session in `cwd`. Returns (session_id, state).
+
+        We choose the id (``--session-id``) rather than letting claude pick
+        one, which is what makes this the front door: the session is managed
+        from its first breath, with a pid recorded, instead of being
+        discovered later as an anonymous external process.
+
+        A fresh UUID cannot collide with a live session, so there is no owner
+        to check for — the one-writer rule is satisfied by construction.
+        """
+        session_id = str(uuid.uuid4())
+        name = project_name(cwd)
+        tab = pane_title(session_id, cwd, title)
+        async with self._lock_for(session_id):
+            async with self._zellij_lock_for(name):
+                await zellij.create_session(name)
+                pane = await zellij.new_tab(
+                    name,
+                    tab,
+                    cwd,
+                    [
+                        "claude",
+                        "--session-id",
+                        session_id,
+                        "--permission-mode",
+                        DEFAULT_PERMISSION_MODE,
+                    ],
+                )
+            try:
+                await zellij.rename_pane(name, pane, tab)
+            except zellij.ZellijError:
+                pass  # cosmetic only
+            await self._wait_tui_ready(name, pane)
+            pid = self._spawned_pid(session_id)
+            db.runtime_binding_put(
+                session_id, name, pane, cwd=cwd, tab_name=tab, pid=pid
+            )
+            _log.info(
+                "new session created: session=%s zellij=%s tab=%s pane=%s pid=%s",
+                session_id, name, tab, pane, pid,
+            )
+            return session_id, RuntimeState(
                 state="managed",
                 controllable=True,
                 zellij_session=name,

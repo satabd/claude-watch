@@ -577,3 +577,60 @@ def test_legacy_binding_adopts_the_single_live_owner(world, monkeypatch):
         SID, db.runtime_binding_get(SID), controller._live_pids_for(SID)
     )
     assert db.runtime_binding_get(SID)["pid"] == 4242
+
+
+# ---------------------------------------------------------------------------
+# New Claude Session — the front door. A session claude-watch starts is
+# managed from birth, so it never needs ownership to be inferred later.
+# ---------------------------------------------------------------------------
+
+def test_new_session_is_managed_from_birth(world, monkeypatch, tmp_path):
+    created: dict = {}
+
+    async def fake_new_tab(name, tab, cwd, command):
+        created["name"], created["tab"] = name, tab
+        created["command"] = command
+        return "terminal_7"
+
+    async def noop(*a, **k):
+        return None
+
+    monkeypatch.setattr("server.runtime.zellij.create_session", noop)
+    monkeypatch.setattr("server.runtime.zellij.new_tab", fake_new_tab)
+    monkeypatch.setattr("server.runtime.zellij.rename_pane", noop)
+    monkeypatch.setattr(
+        controller, "_wait_tui_ready", lambda *a, **k: asyncio.sleep(0)
+    )
+
+    sid, state = asyncio.run(controller.create_session("/proj/rumailahub"))
+
+    # A fresh id, started with --session-id so we own it from the first breath.
+    assert created["command"][:3] == ["claude", "--session-id", sid]
+    assert "--permission-mode" in created["command"]
+    assert created["name"] == "rumailahub"
+    assert created["tab"] == f"rumailahub-{sid[:8]}"
+    assert state.state == "managed" and state.controllable is True
+    # And the binding exists, which is what makes it managed rather than
+    # something to be re-derived later.
+    assert db.runtime_binding_get(sid)["zellij_session"] == "rumailahub"
+    db.runtime_binding_delete(sid)
+
+
+def test_new_session_ids_are_unique(world, monkeypatch):
+    async def fake_new_tab(name, tab, cwd, command):
+        return "terminal_7"
+
+    async def noop(*a, **k):
+        return None
+
+    monkeypatch.setattr("server.runtime.zellij.create_session", noop)
+    monkeypatch.setattr("server.runtime.zellij.new_tab", fake_new_tab)
+    monkeypatch.setattr("server.runtime.zellij.rename_pane", noop)
+    monkeypatch.setattr(
+        controller, "_wait_tui_ready", lambda *a, **k: asyncio.sleep(0)
+    )
+    a, _ = asyncio.run(controller.create_session("/proj/x"))
+    b, _ = asyncio.run(controller.create_session("/proj/x"))
+    assert a != b
+    db.runtime_binding_delete(a)
+    db.runtime_binding_delete(b)

@@ -99,6 +99,22 @@ External session
 External sessions are not second-class forever. They are second-class only
 while something else is writing to them.
 
+### Starting one (the front door)
+
+**New Claude Session** on a project row starts a session with an id we choose
+(`claude --session-id <uuid>`), so it is managed from its first breath — owned,
+in a named pane, pid recorded. Nothing has to be inferred about it later.
+
+It takes a first prompt, and that is not decoration: **Claude writes no
+transcript until a session has a turn in it**, and the sidebar is built from
+transcripts. Without a prompt the session is real, running and managed, but
+cannot be selected until someone types into its pane. With one it is
+selectable in about two seconds.
+
+A session in a directory Claude has not been trusted in stops on the trust
+prompt before it opens at all. The create response reports that instead of
+returning a session that will never appear.
+
 ---
 
 ## Identity

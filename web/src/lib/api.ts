@@ -302,6 +302,30 @@ export const api = {
   // --- Zellij runtime control -------------------------------------------
   runtimeState: (bucket: string, sessionId: string) =>
     jsonFetch<RuntimeState>(`/api/runtime/${bucket}/${sessionId}/state`),
+  /** Start a brand-new Claude session in a project, managed from birth.
+   *  claude-watch picks the session id, so it is owned immediately rather
+   *  than discovered later as an anonymous external process.
+   *
+   *  `prompt` is the session's first turn. Claude writes no transcript until
+   *  a session has one, and the sidebar is built from transcripts — so
+   *  without a prompt the session is real and managed but not yet
+   *  selectable. */
+  newSession: (bucket: string, prompt?: string, title?: string) =>
+    jsonFetch<{
+      session_id: string;
+      bucket: string;
+      cwd: string;
+      /** False while Claude has not written its transcript yet — usually the
+       *  first-run trust prompt. The session is unselectable until it does. */
+      transcript_ready: boolean;
+      blocked_on: { question: string; options: { n: string; label: string }[] } | null;
+      attach_command: string | null;
+      state: RuntimeState;
+    }>(`/api/runtime/${bucket}/sessions`, {
+      method: "POST",
+      body: JSON.stringify({ title: title ?? null, prompt: prompt ?? null }),
+    }),
+
   /** Resume a session into a managed pane. Refuses (409) if any claude is
    *  still alive on the transcript — there is no takeover. */
   runtimeControl: (bucket: string, sessionId: string) =>
