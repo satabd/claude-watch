@@ -127,8 +127,23 @@ def test_cascade_delete_messages_when_thread_deleted(isolated_db):
     assert db.list_review_messages(t["id"]) == []
 
 
-def test_schema_is_at_v7(isolated_db):
-    assert db.schema_version() == 7
+def test_schema_is_at_v8(isolated_db):
+    assert db.schema_version() == 8
+
+
+def test_runtime_binding_records_the_pid_we_spawned(isolated_db):
+    """v8: ownership is a fact we wrote down, not something re-derived from
+    pane titles on every request."""
+    db.runtime_binding_put("sid", "rumailahub", "terminal_2", cwd="/x",
+                           tab_name="rumailahub-a1b2c3d4", pid=4242)
+    assert db.runtime_binding_get("sid")["pid"] == 4242
+
+
+def test_runtime_binding_pid_defaults_to_null(isolated_db):
+    """Rows written before v8 have no pid; the controller upgrades them in
+    place rather than treating them as managed on faith."""
+    db.runtime_binding_put("sid", "rumailahub", "terminal_2", cwd="/x")
+    assert db.runtime_binding_get("sid")["pid"] is None
 
 
 def test_runtime_binding_round_trips_tab_name(isolated_db):

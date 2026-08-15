@@ -461,3 +461,119 @@ def test_pending_prompt_list_only_shows_pending(isolated_db):
     db.pending_prompt_finish(a["id"], ok=True)
     listed = db.pending_prompt_list("b", SID)
     assert [r["text"] for r in listed] == ["two"]
+
+
+
+# ---------------------------------------------------------------------------
+# Ownership state machine (CLAUDE.md, "Ownership")
+#
+# managed  = a pid WE recorded, still alive, still a claude
+# external = someone else's claude is alive on this transcript -> view-only
+# inactive = nothing alive -> we may resume it
+#
+# `asyncio.run` rather than pytest-asyncio: these are the only async tests in
+# the suite and it is not worth a dependency.
+# ---------------------------------------------------------------------------
+
+import asyncio
+
+import pytest
+
+from server.runtime import registry as _registry
+from server.runtime.controller import ClaudeProc, ControlRefused, controller
+
+
+@pytest.fixture
+def world(tmp_path, monkeypatch, isolated_db):
+    """An idle transcript, a Zellij that exists, and an empty process world."""
+    import os
+
+    p = tmp_path / f"{SID}.jsonl"
+    _write_jsonl(p, [_user(), _assistant_text()])
+    old = time.time() - 120
+    os.utime(p, (old, old))
+    monkeypatch.setattr(_registry, "SESSIONS_DIR", tmp_path / "sessions")
+    monkeypatch.setattr(_registry, "claude_processes", lambda: {})
+    monkeypatch.setattr(_registry, "unidentified_claudes", lambda cwd=None: [])
+    monkeypatch.setattr(
+        "server.runtime.controller.find_claude_processes", lambda lines=None: []
+    )
+    monkeypatch.setattr("server.runtime.zellij.zellij_bin", lambda: "/bin/zellij")
+    return p
+
+
+def _stage_owner(monkeypatch, pid, embedded=False):
+    """Make `pid` look like a live claude driving SID, via the argv scan."""
+    argv = f"claude --resume {SID}" + (" --print" if embedded else "")
+    monkeypatch.setattr(
+        "server.runtime.controller.find_claude_processes",
+        lambda lines=None: [
+            ClaudeProc(pid=pid, argv=argv, resume_id=SID, embedded=embedded)
+        ],
+    )
+    monkeypatch.setattr(_registry, "claude_processes", lambda: {pid: argv})
+
+
+def _state(path):
+    return asyncio.run(controller.get_state(SID, path, cwd="/proj"))
+
+
+def test_nothing_alive_is_resumable(world):
+    s = _state(world)
+    assert s.state == "inactive"
+    assert s.controllable is True
+
+
+def test_someone_elses_claude_is_view_only(world, monkeypatch):
+    """The whole contract: an external session is never controllable while
+    its process is alive, no matter how idle it looks."""
+    _stage_owner(monkeypatch, 4242)
+    s = _state(world)
+    assert s.state in ("external_idle", "external_busy")
+    assert s.controllable is False
+    assert s.external_pid == 4242
+
+
+def test_embedded_runtime_also_blocks_resume(world, monkeypatch):
+    """A headless claude owns the transcript just as much as a TUI does."""
+    _stage_owner(monkeypatch, 4242, embedded=True)
+    assert _state(world).controllable is False
+
+
+def test_ensure_managed_refuses_to_start_a_second_claude(world, monkeypatch):
+    _stage_owner(monkeypatch, 4242)
+    with pytest.raises(ControlRefused):
+        asyncio.run(controller.ensure_managed(SID, world, "/proj"))
+
+
+def test_unregistered_claude_in_project_blocks_resume(world, monkeypatch):
+    """Cannot be named, so cannot be ruled out — refuse rather than risk a
+    second writer on the transcript."""
+    monkeypatch.setattr(
+        _registry,
+        "unidentified_claudes",
+        lambda cwd=None: [_registry.UnidentifiedClaude(pid=777, cwd="/proj")],
+    )
+    s = _state(world)
+    assert s.controllable is False
+    assert "777" in (s.reason or "")
+
+
+def test_binding_without_a_live_pid_is_retired(world):
+    """A pane can outlive its claude. The binding describes a process, so if
+    that process is gone the session is resumable — not managed."""
+    db.runtime_binding_put(SID, "proj", "terminal_1", cwd="/proj", pid=999999)
+    s = _state(world)
+    assert s.state == "inactive"
+    assert db.runtime_binding_get(SID) is None
+
+
+def test_legacy_binding_adopts_the_single_live_owner(world, monkeypatch):
+    """Rows written before pid was recorded are upgraded in place when the
+    owner can be named exactly — no guessing from pane titles."""
+    _stage_owner(monkeypatch, 4242)
+    db.runtime_binding_put(SID, "proj", "terminal_1", cwd="/proj")  # pid NULL
+    controller._resolve_binding_pid(
+        SID, db.runtime_binding_get(SID), controller._live_pids_for(SID)
+    )
+    assert db.runtime_binding_get(SID)["pid"] == 4242

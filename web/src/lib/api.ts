@@ -302,10 +302,12 @@ export const api = {
   // --- Zellij runtime control -------------------------------------------
   runtimeState: (bucket: string, sessionId: string) =>
     jsonFetch<RuntimeState>(`/api/runtime/${bucket}/${sessionId}/state`),
-  runtimeControl: (bucket: string, sessionId: string, allowTakeover: boolean) =>
+  /** Resume a session into a managed pane. Refuses (409) if any claude is
+   *  still alive on the transcript — there is no takeover. */
+  runtimeControl: (bucket: string, sessionId: string) =>
     jsonFetch<RuntimeState>(`/api/runtime/${bucket}/${sessionId}/control`, {
       method: "POST",
-      body: JSON.stringify({ allow_takeover: allowTakeover }),
+      body: JSON.stringify({}),
     }),
   pendingList: (bucket: string, sessionId: string) =>
     jsonFetch<{ pending: PendingPrompt[] }>(

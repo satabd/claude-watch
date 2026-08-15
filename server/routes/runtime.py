@@ -20,11 +20,7 @@ from pydantic import BaseModel, Field
 
 from .. import db, projects
 from ..runtime import zellij
-from ..runtime.controller import (
-    ControlRefused,
-    TakeoverConfirmationRequired,
-    controller,
-)
+from ..runtime.controller import ControlRefused, controller
 
 _log = logging.getLogger("watcher.routes.runtime")
 
@@ -56,25 +52,23 @@ async def runtime_state(bucket: str, session_id: str) -> dict:
 
 
 class ControlBody(BaseModel):
-    allow_takeover: bool = False
+    """No fields. There is nothing to confirm: claude-watch either can resume
+    this session (nothing else is alive on it) or it refuses. Kept as a body
+    so the endpoint stays a POST with room to grow."""
 
 
 @router.post("/api/runtime/{bucket}/{session_id}/control")
 async def take_control(bucket: str, session_id: str, body: ControlBody) -> dict:
+    """Resume a session into a managed pane. Never takes one from a running
+    claude — see CLAUDE.md, "Ownership"."""
     path, meta = _resolve(bucket, session_id)
     try:
         state = await controller.ensure_managed(
             session_id,
             path,
             meta.cwd,
-            allow_takeover=body.allow_takeover,
             remote_name=meta.remote_name,
             title=meta.ai_title,
-        )
-    except TakeoverConfirmationRequired as e:
-        # 409 + flag: the UI turns this into an explicit confirmation step.
-        raise HTTPException(
-            409, detail={"needs_takeover_confirmation": True, "reason": str(e)}
         )
     except ControlRefused as e:
         raise HTTPException(409, detail={"reason": str(e)})

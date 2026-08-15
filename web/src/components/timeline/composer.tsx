@@ -26,16 +26,18 @@ import { toast } from "sonner";
 
 /** Chat-style composer anchored under the timeline.
  *
- *  Workflow: type -> Send. Sending ensures a managed Zellij runtime first
- *  (asking for confirmation when that would take over an external claude
- *  TUI), then delivers the prompt through the pane. The user turn comes back
- *  via the normal JSONL -> SSE read path.
+ *  Only rendered for sessions claude-watch can drive. Sending resumes the
+ *  session into a Zellij pane if it is not already in one, then types into
+ *  that pane; the user turn comes back via the normal JSONL -> SSE read path.
  *
- *  The prompt is still recorded server-side as a "pending" row a beat before
- *  it is injected — that row is the atomic double-send guard, not a queue
- *  the user has to shepherd. Rows only stay visible when a send *failed*
- *  (or a takeover needs confirming), so the text is never lost; the happy
- *  path never shows a card.
+ *  A session someone else is running is view-only — the server refuses with a
+ *  409 and the reason lands in a toast. There is no takeover: see CLAUDE.md,
+ *  "Ownership".
+ *
+ *  The prompt is recorded server-side as a "pending" row a beat before it is
+ *  injected — that row is the atomic double-send guard, not a queue the user
+ *  has to shepherd. Rows only stay visible when a send *failed*, so the text
+ *  is never lost; the happy path never shows a card.
  */
 /** `sendingId` value used while the *draft* is being turned into a row —
  *  before it has a real id. Negative so it can never collide with one. */
@@ -52,10 +54,6 @@ export function Composer({ bucket, sessionId }: { bucket: string; sessionId: str
   const [editingId, setEditingId] = React.useState<number | null>(null);
   const [editText, setEditText] = React.useState("");
   const [sendingId, setSendingId] = React.useState<number | null>(null);
-  const [confirmTakeover, setConfirmTakeover] = React.useState<{
-    promptId: number;
-    reason: string;
-  } | null>(null);
 
   const refreshRuntime = React.useCallback(() => {
     api.runtimeState(bucket, sessionId).then(setRuntime).catch(() => setRuntime(null));
@@ -69,7 +67,6 @@ export function Composer({ bucket, sessionId }: { bucket: string; sessionId: str
     setComposing(false);
     setDraft("");
     setEditingId(null);
-    setConfirmTakeover(null);
     // Drop the previous session's runtime immediately: the status bar reads
     // this, and showing another session's pane for a poll interval would be
     // worse than showing nothing.
@@ -134,25 +131,13 @@ export function Composer({ bucket, sessionId }: { bucket: string; sessionId: str
     }
   };
 
-  const sendPrompt = async (id: number, allowTakeover = false) => {
+  const sendPrompt = async (id: number) => {
     setSendingId(id);
-    setConfirmTakeover(null);
     try {
       if (runtime?.state !== "managed") {
-        try {
-          await api.runtimeControl(bucket, sessionId, allowTakeover);
-        } catch (e: any) {
-          if (e?.detail?.needs_takeover_confirmation) {
-            setConfirmTakeover({
-              promptId: id,
-              reason:
-                runtime?.reason ??
-                "An external claude TUI owns this session. Taking control closes it and resumes the session under claude-watch.",
-            });
-            return;
-          }
-          throw e;
-        }
+        // Resumes only when nothing else is alive on the transcript; a 409
+        // carries the reason straight to the toast below.
+        await api.runtimeControl(bucket, sessionId);
       }
       await api.pendingSend(bucket, sessionId, id);
       toast.success("Prompt sent to Claude");
@@ -169,13 +154,13 @@ export function Composer({ bucket, sessionId }: { bucket: string; sessionId: str
     }
   };
 
-  /** Put the session into a zellij pane without sending anything, so it can
-   *  be attached to and watched. Same guarded path a send takes. */
+  /** Resume the session into a Zellij pane without sending anything, so it
+   *  can be attached to and watched. Same guarded path a send takes. */
   const [opening, setOpening] = React.useState(false);
-  const openRuntime = async (allowTakeover = false) => {
+  const openRuntime = async () => {
     setOpening(true);
     try {
-      const st = await api.runtimeControl(bucket, sessionId, allowTakeover);
+      const st = await api.runtimeControl(bucket, sessionId);
       setRuntime(st);
       toast.success(
         st.attach_command
@@ -183,14 +168,7 @@ export function Composer({ bucket, sessionId }: { bucket: string; sessionId: str
           : "Session is now managed"
       );
     } catch (e: any) {
-      if (e?.detail?.needs_takeover_confirmation) {
-        toast.error(
-          e?.detail?.reason ??
-            "An external claude TUI owns this session; send a prompt to confirm takeover."
-        );
-      } else {
-        toast.error(e?.detail?.reason ?? e?.message ?? "Could not start the runtime");
-      }
+      toast.error(e?.detail?.reason ?? e?.message ?? "Could not resume the session");
       refreshRuntime();
     } finally {
       setOpening(false);
@@ -301,14 +279,14 @@ export function Composer({ bucket, sessionId }: { bucket: string; sessionId: str
               disabled={opening}
               onClick={() => openRuntime()}
               className="inline-flex items-center gap-1 rounded-md border border-border px-1.5 py-0.5 text-[11px] text-muted-foreground transition-colors hover:text-foreground disabled:opacity-50"
-              title="Resume this session in a zellij pane you can attach to"
+              title="Resume this session in a Zellij pane you can attach to"
             >
               {opening ? (
                 <Loader2 className="h-3 w-3 animate-spin" />
               ) : (
                 <TerminalSquare className="h-3 w-3" />
               )}
-              Open in zellij
+              Resume in claude-watch
             </button>
           )}
       </div>
@@ -377,64 +355,38 @@ export function Composer({ bucket, sessionId }: { bucket: string; sessionId: str
               <div dir="auto" className="whitespace-pre-wrap break-words text-sm">
                 {p.text}
               </div>
-              {confirmTakeover?.promptId === p.id ? (
-                <div className="mt-2 rounded-md border border-amber-500/30 bg-amber-500/10 p-2 text-[12px]">
-                  <div className="flex items-start gap-1.5 text-amber-700 dark:text-amber-300">
-                    <ShieldAlert className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-                    {confirmTakeover.reason}
-                  </div>
-                  <div className="mt-2 flex justify-end gap-1.5">
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      onClick={() => setConfirmTakeover(null)}
-                    >
-                      Cancel
-                    </Button>
-                    <Button
-                      size="sm"
-                      variant="destructive"
-                      disabled={sendingId === p.id}
-                      onClick={() => sendPrompt(p.id, true)}
-                    >
-                      Take over & send
-                    </Button>
-                  </div>
-                </div>
-              ) : (
-                <div className="mt-2 flex justify-end gap-1.5">
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    onClick={() => discard(p.id)}
-                    title="Discard this pending prompt"
-                  >
-                    <Trash2 className="mr-1 h-3 w-3" /> Discard
-                  </Button>
-                  <Button
-                    variant="secondary"
-                    size="sm"
-                    onClick={() => {
-                      setEditingId(p.id);
-                      setEditText(p.text);
-                    }}
-                  >
-                    <Pencil className="mr-1 h-3 w-3" /> Edit
-                  </Button>
-                  <Button
-                    size="sm"
-                    disabled={sendingId === p.id || controlUnavailable}
-                    onClick={() => sendPrompt(p.id)}
-                  >
-                    {sendingId === p.id ? (
-                      <Loader2 className="mr-1 h-3 w-3 animate-spin" />
-                    ) : (
-                      <Send className="mr-1 h-3 w-3" />
-                    )}
-                    Retry send
-                  </Button>
-                </div>
-              )}
+              <div className="mt-2 flex justify-end gap-1.5">
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => discard(p.id)}
+                  title="Discard this pending prompt"
+                >
+                  <Trash2 className="mr-1 h-3 w-3" /> Discard
+                </Button>
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  onClick={() => {
+                    setEditingId(p.id);
+                    setEditText(p.text);
+                  }}
+                >
+                  <Pencil className="mr-1 h-3 w-3" /> Edit
+                </Button>
+                <Button
+                  size="sm"
+                  disabled={sendingId === p.id || controlUnavailable}
+                  onClick={() => sendPrompt(p.id)}
+                >
+                  {sendingId === p.id ? (
+                    <Loader2 className="mr-1 h-3 w-3 animate-spin" />
+                  ) : (
+                    <Send className="mr-1 h-3 w-3" />
+                  )}
+                  Retry send
+                </Button>
+              </div>
             </>
           )}
         </div>

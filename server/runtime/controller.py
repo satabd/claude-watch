@@ -1,29 +1,28 @@
-"""Runtime state machine binding Claude sessions to disposable Zellij panes.
+"""Ownership state machine for Claude sessions.
 
-Identity model: the Claude session id is the permanent identity. The Zellij
-session (named after the *project*, e.g. ``rumailahub``) and the tab/pane
-holding this particular conversation (``rumailahub-<label>``) are disposable
-runtime bindings persisted in SQLite and re-verified on every use — a binding
-is *never* trusted without checking the Zellij session is actually alive.
-Recovery from pane closure / zellij death / machine restart therefore falls
-out naturally: verification fails, the binding is invalidated, the state
-becomes ``resumable`` and the next control request rebuilds the runtime.
+See CLAUDE.md. The short version:
 
-Safety rules for taking over an *external* claude process (one we did not
-start):
+* ``session_id`` is the identity. A pid, a Zellij session and a pane are
+  *attachments* to it — disposable, re-verified on every use, never identity.
 
-1. The process must be positively identified: its argv must contain
-   ``--resume <session-id>`` (or ``--resume=<id>``) for the exact session.
-   Fresh TUI sessions without ``--resume`` cannot be matched with certainty
-   and are monitor-only.
-2. Embedded / headless claudes are NEVER touched: anything with
-   ``--output-format``, ``-p``/``--print``, or living inside ``Claude.app``
-   (Claude Desktop's agent runtime) is not an interactive terminal — killing
-   it would sever someone else's conversation, not free a TTY.
-3. The session must look idle BOTH by JSONL mtime age and by transcript
-   shape (no user turn or tool_use awaiting a response).
-4. The caller must pass ``allow_takeover=True`` — the UI gets it from an
-   explicit user confirmation, never a default.
+* A session is **managed** when claude-watch started the claude that is
+  running it. That is a recorded fact, not an inference: the pid goes into
+  ``runtime_bindings`` at spawn time, and "still managed" means that exact pid
+  is still running and still a claude.
+
+* A session is **external** when some other claude is alive on it. External
+  sessions are strictly view-only. claude-watch does not take them over and
+  does not signal them. When their process exits they become resumable, and
+  resuming makes them managed.
+
+* The invariant everything serves: **only one claude may write to a transcript
+  at a time.** When we cannot prove the other process is gone, we refuse.
+
+Ownership is decided from deterministic signals only — Claude Code's session
+registry, an argv scan, and Zellij's own view of what exists. Screen scraping
+(``parse_status``, ``parse_blocking_dialog``) is advisory: it drives the
+spinner, the mode badge and the dialog buttons, and is never the basis for
+starting or ending a process.
 """
 from __future__ import annotations
 
@@ -363,6 +362,24 @@ def legacy_session_name(session_id: str) -> str:
 
 
 # Kept as the historical entry point used by tests and older call sites.
+def _pid_is_live_claude(pid: int) -> bool:
+    """True when `pid` is running AND is still a claude.
+
+    Liveness alone is not enough: pids get recycled, and signalling a
+    recycled pid would kill an unrelated process.
+    """
+    procs = registry.claude_processes()
+    if procs is None:  # `ps` unavailable — fall back to bare liveness
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+        return True
+    return pid in procs
+
+
 def zellij_session_name(session_id: str, cwd: str | None = None) -> str:
     return project_name(cwd) if cwd else legacy_session_name(session_id)
 
@@ -546,195 +563,58 @@ class ClaudeRuntimeController:
             return RuntimeState(state="inactive", controllable=False, reason=str(e))
 
         busy = session_is_busy(jsonl_path)
-        name = project_name(cwd)
-        want_title = pane_title(session_id, cwd, title)
 
-        # 1) Existing binding — verify, never trust.
+        # Who is actually alive for this session? Deterministic sources only:
+        # Claude Code's registry, then an argv scan for `--resume <id>`. No
+        # pane titles, nothing off a screen.
+        live = self._live_pids_for(session_id)
         binding = db.runtime_binding_get(session_id)
+
+        # --- MANAGED: a pid we wrote down, still running, still a claude ----
         if binding:
-            state = await zellij.session_state(binding["zellij_session"])
-            if state == "alive":
-                panes = await zellij.list_panes(binding["zellij_session"])
-                pane_ids = {p[0] for p in panes}
-                if binding["pane_id"] in pane_ids:
-                    db.runtime_binding_touch(session_id)
-                    awaiting = None
-                    status: dict = {}
-                    try:
-                        screen = await zellij.dump_screen(
-                            binding["zellij_session"], binding["pane_id"]
-                        )
-                        awaiting = parse_blocking_dialog(screen)
-                        status = parse_status(screen)
-                    except zellij.ZellijError:
-                        pass  # screen introspection is best-effort
-                    # The live pane is a better "is it working" signal than
-                    # JSONL mtime: it reacts instantly and never lags.
-                    # A pane blocked on a dialog often *keeps* its spinner and
-                    # "esc to interrupt" hint on screen. Reporting that as
-                    # "working" is what made a session asking a question look
-                    # permanently stuck, so the question always wins.
-                    working = bool(status.get("working")) and awaiting is None
-                    return RuntimeState(
-                        state="managed",
-                        controllable=True,
-                        zellij_session=binding["zellij_session"],
-                        pane_id=binding["pane_id"],
-                        pane_title=next(
-                            (p[2] for p in panes if p[0] == binding["pane_id"]), None
-                        ),
-                        zellij_tab=binding["tab_name"],
-                        busy=(working or busy) and awaiting is None,
-                        awaiting_input=awaiting,
-                        mode=status.get("mode"),
-                        working=working,
-                        activity=status.get("activity") if working else None,
-                    )
-            # Session or pane vanished — invalidate, fall through.
-            _log.info("stale runtime binding for %s (zellij=%s)", session_id, state)
+            ours = self._resolve_binding_pid(session_id, binding, live)
+            if ours is not None:
+                return await self._managed_state(session_id, binding, ours, busy)
+            # The binding does not describe a live process of ours. It is an
+            # attachment, not identity, so drop it and re-decide from scratch.
+            _log.info("retiring runtime binding for %s (no live pid)", session_id)
             db.runtime_binding_delete(session_id)
-            return RuntimeState(state="resumable", controllable=True, busy=busy)
 
-        # 2) Unbound but a zellij session of ours survives (watch restarted) —
-        #    adopt the pane that carries this session's title. The project
-        #    session holds one pane per claude session, so matching on the
-        #    exact `<project>-<session>` title is what keeps them apart; the
-        #    legacy per-session `cw-<id8>` layout had only one pane, so any
-        #    claude-looking pane in it is unambiguous.
-        for candidate, exact in ((name, True), (legacy_session_name(session_id), False)):
-            if await zellij.session_state(candidate) != "alive":
-                continue
-            panes = await zellij.list_panes(candidate)
-            match = [
-                p
-                for p in panes
-                if p[1] == "terminal"
-                and (p[2] == want_title if exact else "claude" in p[2].lower())
-            ]
-            if match:
-                pane_id = match[0][0]
-                db.runtime_binding_put(
-                    session_id, candidate, pane_id, cwd=cwd, tab_name=match[0][2]
-                )
-                _log.info(
-                    "adopted surviving zellij pane %s/%s for %s",
-                    candidate, pane_id, session_id,
-                )
-                return RuntimeState(
-                    state="managed",
-                    controllable=True,
-                    zellij_session=candidate,
-                    pane_id=pane_id,
-                    pane_title=match[0][2],
-                    zellij_tab=match[0][2],
-                    busy=busy,
-                )
-
-        # 3) Does a live claude already own this session? Claude Code's own
-        #    registry answers this exactly, including for a plain `claude`
-        #    started with no session flag — the case the argv scan below is
-        #    blind to, and the one that used to let us start a *second*
-        #    claude on the same transcript.
-        owners = registry.owners_of(session_id)
-        if owners:
-            owner = owners[-1]
-            if len(owners) > 1:
-                # Already broken: several claudes are appending to one
-                # transcript. Say so — the pane will look like it is ignoring
-                # the conversation, and no amount of staring at it explains why.
-                pids = ", ".join(str(o.pid) for o in owners)
+        # --- EXTERNAL: someone else's claude is alive on this transcript ----
+        if live:
+            owner = live[-1]
+            if len(live) > 1:
+                pids = ", ".join(str(o.pid) for o in live)
                 _log.warning(
-                    "session %s has %d live claude owners (pids %s)",
-                    session_id, len(owners), pids,
+                    "session %s has %d live claude processes (pids %s)",
+                    session_id, len(live), pids,
                 )
                 return RuntimeState(
                     state="external_busy",
                     controllable=False,
                     external_pid=owner.pid,
                     busy=True,
-                    reason=f"{len(owners)} claude processes (pids {pids}) are "
-                    "driving this session at once, so their writes interleave "
-                    "and neither view is complete. Close all but one, then "
-                    "reload.",
-                    detail={"owner_pids": [o.pid for o in owners]},
+                    reason=f"{len(live)} claude processes (pids {pids}) are "
+                    "writing to this transcript at once, so neither view is "
+                    "complete. Close all but one.",
+                    detail={"owner_pids": [o.pid for o in live]},
                 )
-            # `status` is written on transitions, not on a timer, so it goes
-            # unknown on any session that has been sitting still. Fall back to
-            # the JSONL heuristic there. Either way the session is now
-            # `external_*` rather than `inactive`, so control needs an explicit
-            # takeover — which is the property that actually prevents a
-            # second claude on the same transcript.
-            owner_busy = owner.busy
-            effective_busy = busy if owner_busy is None else owner_busy
-            if not owner.takeoverable:
-                return RuntimeState(
-                    state="external_busy" if effective_busy else "external_idle",
-                    controllable=False,
-                    external_pid=owner.pid,
-                    busy=effective_busy,
-                    reason=f"Session is driven by {owner.describe()}, which is "
-                    "not a terminal claude-watch can take over; monitor-only.",
-                )
-            if effective_busy:
-                return RuntimeState(
-                    state="external_busy",
-                    controllable=False,
-                    external_pid=owner.pid,
-                    busy=True,
-                    reason=f"{owner.describe()} is working on this session; "
-                    "takeover is blocked until it goes idle.",
-                )
+            effective_busy = busy if owner.busy is None else owner.busy
             return RuntimeState(
-                state="external_idle",
-                controllable=True,
+                state="external_busy" if effective_busy else "external_idle",
+                controllable=False,
                 external_pid=owner.pid,
-                busy=False,
-                reason=f"{owner.describe()} currently owns this session. "
-                "Taking control closes it and resumes the session under "
-                "claude-watch — otherwise two claudes would write to the "
-                "same transcript.",
+                busy=effective_busy,
+                reason=f"This session is running outside claude-watch "
+                f"({owner.describe()}). It is view-only while that process is "
+                "alive. Close it and you can resume the session here.",
             )
 
-        # 4) Fallback for claude builds with no session registry: identify by
-        #    argv. Only catches processes launched with --resume/--session-id.
-        for proc in find_claude_processes():
-            if proc.resume_id and session_id.startswith(proc.resume_id):
-                if proc.embedded:
-                    return RuntimeState(
-                        state="external_busy" if busy else "external_idle",
-                        controllable=False,
-                        external_pid=proc.pid,
-                        busy=busy,
-                        reason="Session is driven by an embedded runtime "
-                        "(Claude Desktop / SDK); monitor-only.",
-                    )
-                if busy:
-                    return RuntimeState(
-                        state="external_busy",
-                        controllable=False,
-                        external_pid=proc.pid,
-                        busy=True,
-                        reason="Claude is working; takeover is blocked until idle.",
-                    )
-                return RuntimeState(
-                    state="external_idle",
-                    controllable=True,
-                    external_pid=proc.pid,
-                    busy=False,
-                    reason="Taking control will close the external claude TUI "
-                    "and resume the session under claude-watch.",
-                )
-
-        # 5) Nothing *names* this session, but an unregistered claude may
-        #    still be driving it. One that inherited CLAUDE_* env writes no
-        #    registry record, and started as a plain `claude` it has no argv
-        #    flag either — invisible to both checks above, which is exactly
-        #    how a second claude once got spawned onto this transcript. Only
-        #    its directory is knowable, so a match there means "unknown", not
-        #    "free": refuse rather than resume.
-        #
-        #    Not offered as a takeover: we cannot tell which session that
-        #    process holds, so terminating it could close a different one.
+        # --- Nothing owns it by name, but something may still be writing ----
+        # A claude that inherited CLAUDE_* env registers nothing and, started
+        # as a plain `claude`, carries no session flag either. Only its
+        # directory is knowable. That is not enough to call it the owner — but
+        # it is enough to refuse to start a second process on this transcript.
         if unknown := registry.unidentified_claudes(cwd):
             pids = ", ".join(str(u.pid) for u in unknown)
             _log.info(
@@ -744,42 +624,146 @@ class ClaudeRuntimeController:
             return RuntimeState(
                 state="external_idle",
                 controllable=False,
-                external_pid=unknown[0].pid,
                 busy=busy,
                 reason=(
                     f"An unregistered claude (pid {pids}) is running in this "
-                    "project. It publishes no session id, so claude-watch "
-                    "cannot tell whether it is driving this session — and "
-                    "resuming anyway would put two claudes on one transcript. "
-                    "Close it (or start it in its own terminal) and reload."
+                    "project. It publishes no session id, so it cannot be "
+                    "ruled out as the owner of this session, and resuming "
+                    "anyway could put two claudes on one transcript. Close it "
+                    "to resume here."
                 ),
                 detail={"unregistered_pids": [u.pid for u in unknown]},
             )
 
-        # 6) No identified process. If the session still looks mid-turn an
-        #    unidentifiable claude may own it — stay hands-off, but report
-        #    which signal tripped so the UI/user can tell why.
-        if busy:
-            try:
-                age = time.time() - jsonl_path.stat().st_mtime
-            except OSError:
-                age = -1.0
-            recently_written = 0 <= age < IDLE_AFTER_S
-            return RuntimeState(
-                state="external_busy",
-                controllable=False,
-                busy=True,
-                reason=(
-                    "Transcript was written moments ago but no owning claude "
-                    "process could be identified; monitor-only."
-                    if recently_written
-                    else "Transcript ends mid-turn (awaiting a response or "
-                    "tool result) and no owning claude process could be "
-                    "identified; monitor-only."
-                ),
-                detail={"mtime_age_s": round(age, 1)},
+        # --- RESUMABLE: no claude is alive for this session -----------------
+        # The transcript may still end mid-turn if the process was killed
+        # mid-write; that is a reason to say so, not a reason to refuse.
+        return RuntimeState(
+            state="resumable" if busy else "inactive",
+            controllable=True,
+            busy=busy,
+            reason=(
+                "The previous claude exited mid-turn. Resuming starts a fresh "
+                "process on this transcript."
+                if busy
+                else None
+            ),
+        )
+
+    # -- ownership resolution ------------------------------------------------
+
+    def _live_pids_for(self, session_id: str) -> list[registry.LiveSession]:
+        """Every live claude that can be *positively tied* to this session.
+
+        Two deterministic sources, unioned: Claude Code's registry (names the
+        session outright) and an argv scan for `--resume`/`--session-id`
+        (which is how our own spawns are always identifiable, even if the
+        registry misses them). Embedded/headless runtimes are included — they
+        own the transcript just as much, and must block a resume — but they
+        are never takeoverable.
+        """
+        found: dict[int, registry.LiveSession] = {
+            rec.pid: rec for rec in registry.owners_of(session_id)
+        }
+        for proc in find_claude_processes():
+            if proc.resume_id and session_id.startswith(proc.resume_id):
+                found.setdefault(
+                    proc.pid,
+                    registry.LiveSession(
+                        pid=proc.pid,
+                        session_id=session_id,
+                        cwd=None,
+                        kind=None if proc.embedded else "interactive",
+                        entrypoint="sdk" if proc.embedded else "cli",
+                        status=None,
+                        version=None,
+                    ),
+                )
+        return [found[pid] for pid in sorted(found)]
+
+    def _resolve_binding_pid(
+        self,
+        session_id: str,
+        binding: dict,
+        live: list[registry.LiveSession],
+    ) -> int | None:
+        """The pid this binding refers to, if it is still our live claude.
+
+        Bindings written before pid was recorded carry NULL. Those are
+        upgraded in place when exactly one live claude owns the session — the
+        argv/registry match names the session, so there is no guessing — and
+        retired otherwise.
+        """
+        live_pids = {rec.pid for rec in live}
+        recorded = binding.get("pid")
+        if recorded is not None:
+            return recorded if recorded in live_pids else None
+        if len(live) == 1:
+            pid = live[0].pid
+            db.runtime_binding_put(
+                session_id,
+                binding["zellij_session"],
+                binding["pane_id"],
+                cwd=binding.get("cwd"),
+                tab_name=binding.get("tab_name"),
+                pid=pid,
             )
-        return RuntimeState(state="inactive", controllable=True, busy=False)
+            _log.info("adopted pid %s into legacy binding for %s", pid, session_id)
+            return pid
+        return None
+
+    async def _managed_state(
+        self, session_id: str, binding: dict, pid: int, busy: bool
+    ) -> RuntimeState:
+        """Render a managed session. The pane is an attachment: if it is gone
+        the session is still ours, it just needs one rebuilt."""
+        name, pane = binding["zellij_session"], binding["pane_id"]
+        pane_alive = False
+        panes: list[tuple[str, str, str]] = []
+        if await zellij.session_state(name) == "alive":
+            panes = await zellij.list_panes(name)
+            pane_alive = any(p[0] == pane for p in panes)
+        if not pane_alive:
+            return RuntimeState(
+                state="managed",
+                controllable=True,
+                zellij_session=name,
+                pane_id=None,
+                pane_title=binding.get("tab_name"),
+                zellij_tab=binding.get("tab_name"),
+                external_pid=pid,
+                busy=busy,
+                reason="The claude for this session is running but its pane is "
+                "gone. Reattach to get a window on it again.",
+            )
+
+        db.runtime_binding_touch(session_id)
+        awaiting = None
+        status: dict = {}
+        try:
+            screen = await zellij.dump_screen(name, pane)
+            awaiting = parse_blocking_dialog(screen)
+            status = parse_status(screen)
+        except zellij.ZellijError:
+            pass  # advisory only — never load-bearing
+        # A pane blocked on a dialog often keeps its spinner and "esc to
+        # interrupt" on screen, which is what made a session asking a question
+        # look permanently stuck. The question always wins.
+        working = bool(status.get("working")) and awaiting is None
+        return RuntimeState(
+            state="managed",
+            controllable=True,
+            zellij_session=name,
+            pane_id=pane,
+            pane_title=next((p[2] for p in panes if p[0] == pane), None),
+            zellij_tab=binding.get("tab_name"),
+            external_pid=pid,
+            busy=(working or busy) and awaiting is None,
+            awaiting_input=awaiting,
+            mode=status.get("mode"),
+            working=working,
+            activity=status.get("activity") if working else None,
+        )
 
     # -- control -------------------------------------------------------------
 
@@ -789,51 +773,47 @@ class ClaudeRuntimeController:
         jsonl_path: Path,
         cwd: str | None,
         *,
-        allow_takeover: bool = False,
         remote_name: str | None = None,
         title: str | None = None,
     ) -> RuntimeState:
+        """Make this session managed: resume it into a pane, or rebuild the
+        pane of one we already own.
+
+        Never takes a session away from a running claude. If anything else is
+        alive on this transcript the caller gets a refusal — that is the whole
+        contract, and the reason there is no `allow_takeover` any more.
+        """
         async with self._lock_for(session_id):
             state = await self.get_state(
                 session_id, jsonl_path, remote_name=remote_name, cwd=cwd, title=title
             )
-            if state.state == "managed":
-                return state
             if not state.controllable:
                 raise ControlRefused(state.reason or f"state={state.state}")
+            if state.state == "managed":
+                if state.pane_id is not None:
+                    return state
+                # Ours, but its window is gone. Give it a new one; the process
+                # — and therefore the conversation — is untouched.
+                return await self._reattach_pane(session_id, cwd, title, state)
 
-            if state.state == "external_idle":
-                if not allow_takeover:
-                    raise TakeoverConfirmationRequired(
-                        state.reason or "external claude TUI must be closed first"
-                    )
-                assert state.external_pid is not None
-                await self._terminate_pid(state.external_pid)
-                # Re-verify nothing raced us back to busy.
-                if session_is_busy(jsonl_path):
-                    raise ControlRefused(
-                        "session became active again during takeover; aborted"
-                    )
-
-            # Last-mile guard. get_state() ran before any awaits above, and a
-            # `claude` can be started by hand in the seconds since. Spawning a
-            # second one is the single most damaging thing this class can do —
-            # two interactive processes appending to one JSONL — so re-ask the
-            # registry immediately before committing.
-            if survivors := registry.owners_of(session_id):
+            # Last-mile guard. get_state() ran before the awaits above, and a
+            # `claude` can be started by hand in the seconds since. Starting a
+            # second process on one transcript is the most damaging thing this
+            # class can do, so re-ask immediately before committing.
+            if survivors := self._live_pids_for(session_id):
                 raise ControlRefused(
-                    f"{survivors[-1].describe()} owns this session; refusing to "
-                    "start a second claude on the same transcript"
+                    f"{survivors[-1].describe()} is alive on this session; "
+                    "refusing to start a second claude on the same transcript"
                 )
             if unknown := registry.unidentified_claudes(cwd):
                 raise ControlRefused(
                     f"{unknown[0].describe()} is running in this project and "
-                    "publishes no session id, so it may be driving this "
-                    "session; refusing to start a second claude on the same "
-                    "transcript"
+                    "publishes no session id, so it cannot be ruled out as "
+                    "this session's owner; refusing to start a second claude "
+                    "on the same transcript"
                 )
 
-            # inactive / resumable / (external now terminated) → build runtime.
+            # inactive / resumable → build the runtime.
             # One zellij session per project, one *tab* per claude session:
             # a tab gives the TUI the session's full width, where a second
             # pane in a shared tab would halve it and wreck dialog rendering.
@@ -860,10 +840,16 @@ class ClaudeRuntimeController:
             # Don't hand the runtime out until the TUI is actually accepting
             # input — injecting into a booting claude loses the submit Enter.
             await self._wait_tui_ready(name, pane)
-            db.runtime_binding_put(session_id, name, pane, cwd=cwd, tab_name=tab)
+            # Write down which process is ours. Everything afterwards —
+            # "is this still managed", "what may release() reap" — reads this
+            # instead of re-deriving ownership from panes and titles.
+            pid = self._spawned_pid(session_id)
+            db.runtime_binding_put(
+                session_id, name, pane, cwd=cwd, tab_name=tab, pid=pid
+            )
             _log.info(
-                "managed runtime created: session=%s zellij=%s tab=%s pane=%s",
-                session_id, name, tab, pane,
+                "managed runtime created: session=%s zellij=%s tab=%s pane=%s pid=%s",
+                session_id, name, tab, pane, pid,
             )
             return RuntimeState(
                 state="managed",
@@ -872,9 +858,53 @@ class ClaudeRuntimeController:
                 pane_id=pane,
                 pane_title=tab,
                 zellij_tab=tab,
+                external_pid=pid,
                 mode=DEFAULT_PERMISSION_MODE,
                 busy=False,
             )
+
+    def _spawned_pid(self, session_id: str) -> int | None:
+        """The pid of the claude we just started, or None if it cannot be
+        named yet. We always spawn with ``--resume <session_id>``, so the argv
+        scan identifies it exactly; the registry is consulted too in case the
+        process is slower to appear in one than the other. None is survivable:
+        the binding is upgraded on the next state read."""
+        live = self._live_pids_for(session_id)
+        return live[-1].pid if live else None
+
+    async def _reattach_pane(
+        self,
+        session_id: str,
+        cwd: str | None,
+        title: str | None,
+        state: RuntimeState,
+    ) -> RuntimeState:
+        """Rebuild a window onto a claude we own whose pane has gone.
+
+        No new claude process is started — the pane is an attachment, and this
+        replaces the attachment only. `zellij attach` in a fresh tab would be
+        wrong (it nests a client); instead the existing session is reported so
+        the user can attach, and the binding keeps the pid.
+        """
+        name = project_name(cwd)
+        tab = pane_title(session_id, cwd, title)
+        _log.info(
+            "session %s: pane gone, claude pid %s still alive",
+            session_id, state.external_pid,
+        )
+        return RuntimeState(
+            state="managed",
+            controllable=False,
+            zellij_session=name,
+            pane_id=None,
+            pane_title=tab,
+            zellij_tab=tab,
+            external_pid=state.external_pid,
+            busy=state.busy,
+            reason=f"claude (pid {state.external_pid}) is still running for "
+            "this session but its pane is gone, so there is nothing to type "
+            "into. Close it from Close pane, then resume here.",
+        )
 
     async def _wait_tui_ready(
         self, name: str, pane: str, timeout: float = 15.0
@@ -899,8 +929,17 @@ class ClaudeRuntimeController:
             await asyncio.sleep(0.5)
         _log.warning("TUI readiness wait timed out for %s/%s", name, pane)
 
-    async def _terminate_pid(self, pid: int) -> None:
-        """SIGTERM exactly one positively-identified claude TUI; wait for exit."""
+    async def _terminate_owned_pid(self, pid: int) -> None:
+        """SIGTERM a claude **claude-watch started**; wait for it to exit.
+
+        Only ever called with a pid read back out of our own runtime binding.
+        There is deliberately no path from a user action to signalling a
+        process we did not start — an external claude is view-only, and the
+        way to end it is to close it where it lives.
+
+        Never SIGKILL: a claude caught mid-write to its JSONL should be
+        allowed to finish the line.
+        """
         try:
             os.kill(pid, signal.SIGTERM)
         except ProcessLookupError:
@@ -913,9 +952,9 @@ class ClaudeRuntimeController:
             except ProcessLookupError:
                 return
         raise ControlRefused(
-            f"external claude (pid {pid}) did not exit within "
-            f"{TERMINATE_WAIT_S:.0f}s; takeover aborted (not killed with -9 "
-            "on purpose — it may be mid-write)"
+            f"our claude (pid {pid}) did not exit within "
+            f"{TERMINATE_WAIT_S:.0f}s (not killed with -9 on purpose — it may "
+            "be mid-write)"
         )
 
     # -- prompt delivery -----------------------------------------------------
@@ -926,7 +965,18 @@ class ClaudeRuntimeController:
             binding = db.runtime_binding_get(session_id)
             if not binding:
                 raise ControlRefused("no managed runtime; take control first")
+            ours = binding.get("pid")
+            if ours is not None and not _pid_is_live_claude(ours):
+                db.runtime_binding_delete(session_id)
+                raise ControlRefused(
+                    "the claude we started for this session has exited; "
+                    "resume it here before sending"
+                )
             name, pane = binding["zellij_session"], binding["pane_id"]
+            if not pane:
+                raise ControlRefused(
+                    "this session has no pane to type into; resume it here first"
+                )
             # verify liveness immediately before writing — stale bindings must
             # fail loudly rather than fall back to another session (zellij's
             # single-session fallback would type into an unrelated terminal).
@@ -950,17 +1000,19 @@ class ClaudeRuntimeController:
         nowhere visible, and the next take-control then refuses because the
         registry — correctly — reports the session as owned.
 
-        So this verifies against the registry and reaps a survivor with
-        SIGTERM. Never SIGKILL: a claude caught mid-write to its JSONL should
-        be allowed to finish the line.
+        So this verifies the outcome and reaps a survivor with SIGTERM — but
+        only the pid recorded in our own binding. "Whoever owns this session"
+        is the wrong question here: if some other claude has since attached to
+        the transcript, it is not ours to kill.
         """
         async with self._lock_for(session_id):
             binding = db.runtime_binding_get(session_id)
             if not binding:
                 return {"released": False, "reason": "no managed runtime"}
             name, pane = binding["zellij_session"], binding["pane_id"]
+            ours = binding.get("pid")
 
-            if await zellij.session_state(name) == "alive":
+            if pane and await zellij.session_state(name) == "alive":
                 try:
                     await zellij.close_pane(name, pane)
                 except zellij.ZellijError as e:
@@ -969,24 +1021,25 @@ class ClaudeRuntimeController:
             # Give the TUI a moment to exit on its own before reaching for a
             # signal — a clean exit flushes; a signal races the flush.
             reaped: list[int] = []
-            deadline = time.monotonic() + 6.0
-            while time.monotonic() < deadline:
-                if not registry.owners_of(session_id):
-                    break
-                await asyncio.sleep(0.5)
-            for survivor in registry.owners_of(session_id):
-                _log.warning(
-                    "claude %s survived pane close for %s; terminating",
-                    survivor.pid, session_id,
-                )
-                try:
-                    await self._terminate_pid(survivor.pid)
-                    reaped.append(survivor.pid)
-                except ControlRefused as e:
-                    _log.error("could not reap %s: %s", survivor.pid, e)
+            if ours is not None:
+                deadline = time.monotonic() + 6.0
+                while time.monotonic() < deadline:
+                    if not _pid_is_live_claude(ours):
+                        break
+                    await asyncio.sleep(0.5)
+                if _pid_is_live_claude(ours):
+                    _log.warning(
+                        "claude %s survived pane close for %s; terminating",
+                        ours, session_id,
+                    )
+                    try:
+                        await self._terminate_owned_pid(ours)
+                        reaped.append(ours)
+                    except ControlRefused as e:
+                        _log.error("could not reap %s: %s", ours, e)
 
             db.runtime_binding_delete(session_id)
-            still = [o.pid for o in registry.owners_of(session_id)]
+            still = [ours] if ours is not None and _pid_is_live_claude(ours) else []
             return {
                 "released": True,
                 "zellij_session": name,
@@ -1084,10 +1137,6 @@ class ClaudeRuntimeController:
 
 class ControlRefused(RuntimeError):
     """The requested control action is unsafe or impossible right now."""
-
-
-class TakeoverConfirmationRequired(ControlRefused):
-    """Taking over an external TUI needs an explicit user confirmation."""
 
 
 controller = ClaudeRuntimeController()
