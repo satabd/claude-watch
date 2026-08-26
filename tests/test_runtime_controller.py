@@ -634,3 +634,47 @@ def test_new_session_ids_are_unique(world, monkeypatch):
     assert a != b
     db.runtime_binding_delete(a)
     db.runtime_binding_delete(b)
+
+
+RESUME_DIALOG_UNDER_PROSE = """\
+⏺ Both remaining workstreams are now merged. Summary:
+  1. Per-customer rate limits (was: 2 failing tests). Root cause: WS-1 added only
+  global buckets; per-customer keys were never sharded.
+  3. Dependencies. Audit-driven, grouped, each group verified, lockfile regenerated
+  web+admin (typechecks + 183 web tests green); posthog-js 1.420.0 → dompurify 3
+──────────────────────────────────────────────────────────────
+  This session is 6h 51m old and 213.7k tokens.
+  Resuming the full session will consume a substantial portion of your usage limits. We recommend resuming from a summary.
+  ❯ 1. Resume from summary (recommended)
+    2. Resume full session as-is
+    3. Don't ask me again
+  Enter to confirm · Esc to cancel
+"""
+
+
+def test_dialog_found_below_prose_numbered_list():
+    """Captured from a live resume: the assistant's own numbered list sits
+    above the dialog. The scan used to collect the prose lines as "options",
+    stop at the blank line, and report no dialog — while the user stared at
+    one. The ❯ selection marker anchors the real block."""
+    d = parse_blocking_dialog(RESUME_DIALOG_UNDER_PROSE)
+    assert d is not None
+    assert [o["n"] for o in d["options"]] == ["1", "2", "3"]
+    assert d["options"][0]["label"].startswith("Resume from summary")
+    assert "usage limits" in d["question"]
+    # the prose list must NOT leak into the options
+    assert all("rate limits" not in o["label"] for o in d["options"])
+
+
+def test_dialog_detected_under_trailing_blank_rows():
+    """The pane is 50 rows; a short dialog leaves ~40 blank rows under it.
+    A fixed window over the raw grid saw only blanks."""
+    short = (
+        "  Do you want to proceed?\n"
+        "  ❯ 1. Yes\n"
+        "    2. No\n"
+        "  Esc to cancel\n" + "\n" * 43
+    )
+    d = parse_blocking_dialog(short)
+    assert d is not None
+    assert [o["n"] for o in d["options"]] == ["1", "2"]

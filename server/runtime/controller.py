@@ -122,6 +122,10 @@ def parse_status(screen: str) -> dict:
     the caller must treat every value as optional.
     """
     lines = screen.splitlines()
+    # Same trailing-blank trim as parse_blocking_dialog: the status line sits
+    # under the content, not at the bottom of the (taller) pane grid.
+    while lines and not lines[-1].strip():
+        lines.pop()
     tail = lines[-12:]
 
     mode = None
@@ -254,19 +258,47 @@ def parse_blocking_dialog(screen: str) -> dict | None:
     picks up the "Security guide" footer link sitting between the prose and
     the options.
     """
+    # Trim trailing blank rows FIRST: the pane is taller than the TUI's
+    # content (we force 50 rows), and short dialogs — the resume-from-summary
+    # prompt is 7 lines — sit at the top with ~40 blank rows under them. A
+    # window over the raw grid saw only blanks and reported "no dialog"
+    # while the user was staring at one.
+    raw = screen.splitlines()
+    while raw and not raw[-1].strip():
+        raw.pop()
     # 40, not 25: at the geometry we force (see zellij.DEFAULT_ROWS) a
     # permission dialog with a diff preview pushes its hint line well past
     # 25 rows from the bottom.
-    lines = [_strip_box(ln) for ln in screen.splitlines()[-40:]]
+    lines = [_strip_box(ln) for ln in raw[-40:]]
     lowered = [ln.lower() for ln in lines]
     has_hint = any(h in ln for ln in lowered for h in _DIALOG_HINTS)
     has_marker = any(_SELECTED_OPTION_RE.match(ln.strip()) for ln in lines)
     if not (has_hint or has_marker):
         return None
 
+    # Anchor the scan at the ❯-marked selection row when there is one.
+    # Assistant prose above the dialog routinely contains its own numbered
+    # lists ("1. Per-customer rate limits…"), and a scan from the top of the
+    # window used to collect those as the "options", hit the blank line that
+    # ended the prose, and stop — never reaching the actual dialog. Prose
+    # never carries the selection marker, so the block around the LAST ❯ row
+    # is the dialog. Walk up from it over contiguous option rows to find the
+    # block's true top (the marker can sit on option 2 of 3).
+    scan_from = 0
+    marker_idx = None
+    for i, ln in enumerate(lines):
+        if _SELECTED_OPTION_RE.match(ln.strip()):
+            marker_idx = i
+    if marker_idx is not None:
+        scan_from = marker_idx
+        j = marker_idx - 1
+        while j >= 0 and _DIALOG_OPTION_RE.match(lines[j]):
+            scan_from = j
+            j -= 1
+
     options: list[dict] = []
     first_option_idx: int | None = None
-    for i, ln in enumerate(lines):
+    for i, ln in enumerate(lines[scan_from:], scan_from):
         m = _DIALOG_OPTION_RE.match(ln)
         if m:
             options.append({"n": m.group(1), "label": m.group(2)})
