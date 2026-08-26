@@ -8,9 +8,12 @@ import time
 from server import db
 from server.runtime.controller import (
     find_claude_processes,
+    pane_title,
     parse_blocking_dialog,
     parse_status,
+    project_name,
     session_is_busy,
+    session_label,
     transcript_looks_terminal,
     zellij_session_name,
 )
@@ -224,6 +227,99 @@ def test_no_dialog_when_numbered_list_in_output():
     assert parse_blocking_dialog(screen) is None
 
 
+# Captured verbatim from `zellij action dump-screen` on a real claude 2.1.220
+# trust prompt. Two traps live in here: the question is *not* the nearest
+# line above the options ("Security guide" is), and option 1's label wraps.
+TRUST_SCREEN = """\
+ Quick safety check: Is this a project you
+ created or one you trust? (Like your own code,
+ a well-known open source project, or work
+ from your team). If not, take a moment to
+ review what's in this folder first.
+
+ Claude Code'll be able to read, edit, and
+ execute files here.
+
+ Security guide
+
+ ❯ 1. Yes, I trust this folder
+   2. No, exit
+
+ Enter to confirm · Esc to cancel
+"""
+
+
+def test_parse_trust_dialog():
+    d = parse_blocking_dialog(TRUST_SCREEN)
+    assert d is not None
+    assert d["question"].endswith("first.")
+    assert [o["n"] for o in d["options"]] == ["1", "2"]
+    assert d["options"][0]["label"] == "Yes, I trust this folder"
+    # the hint line must not be swallowed into the last option
+    assert d["options"][1]["label"] == "No, exit"
+
+
+def test_parse_dialog_inside_box_border():
+    # Claude frames some dialogs; the border must not hide the options.
+    screen = """\
+╭──────────────────────────────────────────────╮
+│ Do you want to make this edit to parser.py?  │
+│                                              │
+│ ❯ 1. Yes                                     │
+│   2. Yes, allow all edits this session       │
+│   3. No, and tell Claude what to do          │
+│                                              │
+│ Esc to cancel                                │
+╰──────────────────────────────────────────────╯
+"""
+    d = parse_blocking_dialog(screen)
+    assert d is not None
+    assert d["question"] == "Do you want to make this edit to parser.py?"
+    assert [o["label"] for o in d["options"]][0] == "Yes"
+    assert len(d["options"]) == 3
+
+
+def test_no_dialog_when_numbered_list_sits_above_composer_marker():
+    # The composer's bare "❯" is on screen permanently — it must never make a
+    # numbered list in ordinary output look like a selectable dialog.
+    screen = """\
+⏺ Steps:
+  1. Install deps
+  2. Run the server
+────────────────────────────────
+❯
+────────────────────────────────
+  ⏵⏵ auto mode on · ? for shortcuts
+"""
+    assert parse_blocking_dialog(screen) is None
+
+
+# ---------------------------------------------------------------------------
+# Naming: one zellij session per project, one pane per claude session
+# ---------------------------------------------------------------------------
+
+def test_project_name_is_the_folder_name():
+    assert project_name("/Volumes/AI-STUDIO/Projects/rumailahub") == "rumailahub"
+    assert project_name("/Users/sat/Dev/My App!") == "my-app"
+
+
+def test_project_name_falls_back_to_bucket_then_constant():
+    assert project_name(None, "-Users-sat-Dev-rumailahub") == "rumailahub"
+    assert project_name(None, None) == "claude-watch"
+
+
+def test_pane_title_prefers_ai_title_over_session_id():
+    assert (
+        pane_title(SID, "/x/rumailahub", "Fix the login flow")
+        == "rumailahub-fix-the-login-flow"
+    )
+    assert pane_title(SID, "/x/rumailahub", None) == f"rumailahub-{SID[:8]}"
+
+
+def test_session_label_ignores_a_title_that_slugs_to_nothing():
+    assert session_label(SID, "!!!") == SID[:8]
+
+
 # ---------------------------------------------------------------------------
 # Status line: permission mode + live activity
 # (fixtures captured verbatim from a real claude 2.x TUI pane)
@@ -365,3 +461,176 @@ def test_pending_prompt_list_only_shows_pending(isolated_db):
     db.pending_prompt_finish(a["id"], ok=True)
     listed = db.pending_prompt_list("b", SID)
     assert [r["text"] for r in listed] == ["two"]
+
+
+
+# ---------------------------------------------------------------------------
+# Ownership state machine (CLAUDE.md, "Ownership")
+#
+# managed  = a pid WE recorded, still alive, still a claude
+# external = someone else's claude is alive on this transcript -> view-only
+# inactive = nothing alive -> we may resume it
+#
+# `asyncio.run` rather than pytest-asyncio: these are the only async tests in
+# the suite and it is not worth a dependency.
+# ---------------------------------------------------------------------------
+
+import asyncio
+
+import pytest
+
+from server.runtime import registry as _registry
+from server.runtime.controller import ClaudeProc, ControlRefused, controller
+
+
+@pytest.fixture
+def world(tmp_path, monkeypatch, isolated_db):
+    """An idle transcript, a Zellij that exists, and an empty process world."""
+    import os
+
+    p = tmp_path / f"{SID}.jsonl"
+    _write_jsonl(p, [_user(), _assistant_text()])
+    old = time.time() - 120
+    os.utime(p, (old, old))
+    monkeypatch.setattr(_registry, "SESSIONS_DIR", tmp_path / "sessions")
+    monkeypatch.setattr(_registry, "claude_processes", lambda: {})
+    monkeypatch.setattr(_registry, "unidentified_claudes", lambda cwd=None: [])
+    monkeypatch.setattr(
+        "server.runtime.controller.find_claude_processes", lambda lines=None: []
+    )
+    monkeypatch.setattr("server.runtime.zellij.zellij_bin", lambda: "/bin/zellij")
+    return p
+
+
+def _stage_owner(monkeypatch, pid, embedded=False):
+    """Make `pid` look like a live claude driving SID, via the argv scan."""
+    argv = f"claude --resume {SID}" + (" --print" if embedded else "")
+    monkeypatch.setattr(
+        "server.runtime.controller.find_claude_processes",
+        lambda lines=None: [
+            ClaudeProc(pid=pid, argv=argv, resume_id=SID, embedded=embedded)
+        ],
+    )
+    monkeypatch.setattr(_registry, "claude_processes", lambda: {pid: argv})
+
+
+def _state(path):
+    return asyncio.run(controller.get_state(SID, path, cwd="/proj"))
+
+
+def test_nothing_alive_is_resumable(world):
+    s = _state(world)
+    assert s.state == "inactive"
+    assert s.controllable is True
+
+
+def test_someone_elses_claude_is_view_only(world, monkeypatch):
+    """The whole contract: an external session is never controllable while
+    its process is alive, no matter how idle it looks."""
+    _stage_owner(monkeypatch, 4242)
+    s = _state(world)
+    assert s.state in ("external_idle", "external_busy")
+    assert s.controllable is False
+    assert s.external_pid == 4242
+
+
+def test_embedded_runtime_also_blocks_resume(world, monkeypatch):
+    """A headless claude owns the transcript just as much as a TUI does."""
+    _stage_owner(monkeypatch, 4242, embedded=True)
+    assert _state(world).controllable is False
+
+
+def test_ensure_managed_refuses_to_start_a_second_claude(world, monkeypatch):
+    _stage_owner(monkeypatch, 4242)
+    with pytest.raises(ControlRefused):
+        asyncio.run(controller.ensure_managed(SID, world, "/proj"))
+
+
+def test_unregistered_claude_in_project_blocks_resume(world, monkeypatch):
+    """Cannot be named, so cannot be ruled out — refuse rather than risk a
+    second writer on the transcript."""
+    monkeypatch.setattr(
+        _registry,
+        "unidentified_claudes",
+        lambda cwd=None: [_registry.UnidentifiedClaude(pid=777, cwd="/proj")],
+    )
+    s = _state(world)
+    assert s.controllable is False
+    assert "777" in (s.reason or "")
+
+
+def test_binding_without_a_live_pid_is_retired(world):
+    """A pane can outlive its claude. The binding describes a process, so if
+    that process is gone the session is resumable — not managed."""
+    db.runtime_binding_put(SID, "proj", "terminal_1", cwd="/proj", pid=999999)
+    s = _state(world)
+    assert s.state == "inactive"
+    assert db.runtime_binding_get(SID) is None
+
+
+def test_legacy_binding_adopts_the_single_live_owner(world, monkeypatch):
+    """Rows written before pid was recorded are upgraded in place when the
+    owner can be named exactly — no guessing from pane titles."""
+    _stage_owner(monkeypatch, 4242)
+    db.runtime_binding_put(SID, "proj", "terminal_1", cwd="/proj")  # pid NULL
+    controller._resolve_binding_pid(
+        SID, db.runtime_binding_get(SID), controller._live_pids_for(SID)
+    )
+    assert db.runtime_binding_get(SID)["pid"] == 4242
+
+
+# ---------------------------------------------------------------------------
+# New Claude Session — the front door. A session claude-watch starts is
+# managed from birth, so it never needs ownership to be inferred later.
+# ---------------------------------------------------------------------------
+
+def test_new_session_is_managed_from_birth(world, monkeypatch, tmp_path):
+    created: dict = {}
+
+    async def fake_new_tab(name, tab, cwd, command):
+        created["name"], created["tab"] = name, tab
+        created["command"] = command
+        return "terminal_7"
+
+    async def noop(*a, **k):
+        return None
+
+    monkeypatch.setattr("server.runtime.zellij.create_session", noop)
+    monkeypatch.setattr("server.runtime.zellij.new_tab", fake_new_tab)
+    monkeypatch.setattr("server.runtime.zellij.rename_pane", noop)
+    monkeypatch.setattr(
+        controller, "_wait_tui_ready", lambda *a, **k: asyncio.sleep(0)
+    )
+
+    sid, state = asyncio.run(controller.create_session("/proj/rumailahub"))
+
+    # A fresh id, started with --session-id so we own it from the first breath.
+    assert created["command"][:3] == ["claude", "--session-id", sid]
+    assert "--permission-mode" in created["command"]
+    assert created["name"] == "rumailahub"
+    assert created["tab"] == f"rumailahub-{sid[:8]}"
+    assert state.state == "managed" and state.controllable is True
+    # And the binding exists, which is what makes it managed rather than
+    # something to be re-derived later.
+    assert db.runtime_binding_get(sid)["zellij_session"] == "rumailahub"
+    db.runtime_binding_delete(sid)
+
+
+def test_new_session_ids_are_unique(world, monkeypatch):
+    async def fake_new_tab(name, tab, cwd, command):
+        return "terminal_7"
+
+    async def noop(*a, **k):
+        return None
+
+    monkeypatch.setattr("server.runtime.zellij.create_session", noop)
+    monkeypatch.setattr("server.runtime.zellij.new_tab", fake_new_tab)
+    monkeypatch.setattr("server.runtime.zellij.rename_pane", noop)
+    monkeypatch.setattr(
+        controller, "_wait_tui_ready", lambda *a, **k: asyncio.sleep(0)
+    )
+    a, _ = asyncio.run(controller.create_session("/proj/x"))
+    b, _ = asyncio.run(controller.create_session("/proj/x"))
+    assert a != b
+    db.runtime_binding_delete(a)
+    db.runtime_binding_delete(b)

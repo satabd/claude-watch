@@ -50,6 +50,7 @@ import {
   UserMessageView,
 } from "./parts/reviewer-message-view";
 import { toast } from "sonner";
+import { copyText } from "@/lib/clipboard";
 
 /** Fallback skill list when ``/api/reviews/skills`` hasn't replied yet (or
  *  the call failed). The runtime list is fetched on panel-open and cached
@@ -457,7 +458,7 @@ export function ReviewPanel() {
       return;
     }
     try {
-      await navigator.clipboard.writeText(prompt.trim());
+      await copyText(prompt.trim());
       toast.success("Copied next prompt");
     } catch {
       toast.error("Clipboard write failed");

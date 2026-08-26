@@ -194,6 +194,10 @@ export const api = {
   summarizeSession: (req: {
     session_id: string;
     transcript: string;
+    /** Lets the server ask the session itself instead of re-sending the
+     *  transcript; `transcript` stays the cache key and the fallback. */
+    bucket?: string;
+    in_session?: boolean;
     force?: boolean;
     provider?: string;
   }) =>
@@ -202,6 +206,9 @@ export const api = {
       cached: boolean;
       model: string;
       content_hash: string;
+      /** Where the answer came from: the live pane, a headless resume of the
+       *  session, the pasted transcript, or the cache. */
+      source: "pane" | "resume" | "transcript" | "cache";
     }>("/api/summarize-session", { method: "POST", body: JSON.stringify(req) }),
 
   // ---- Prompt Writer ----
@@ -295,10 +302,36 @@ export const api = {
   // --- Zellij runtime control -------------------------------------------
   runtimeState: (bucket: string, sessionId: string) =>
     jsonFetch<RuntimeState>(`/api/runtime/${bucket}/${sessionId}/state`),
-  runtimeControl: (bucket: string, sessionId: string, allowTakeover: boolean) =>
+  /** Start a brand-new Claude session in a project, managed from birth.
+   *  claude-watch picks the session id, so it is owned immediately rather
+   *  than discovered later as an anonymous external process.
+   *
+   *  `prompt` is the session's first turn. Claude writes no transcript until
+   *  a session has one, and the sidebar is built from transcripts — so
+   *  without a prompt the session is real and managed but not yet
+   *  selectable. */
+  newSession: (bucket: string, prompt?: string, title?: string) =>
+    jsonFetch<{
+      session_id: string;
+      bucket: string;
+      cwd: string;
+      /** False while Claude has not written its transcript yet — usually the
+       *  first-run trust prompt. The session is unselectable until it does. */
+      transcript_ready: boolean;
+      blocked_on: { question: string; options: { n: string; label: string }[] } | null;
+      attach_command: string | null;
+      state: RuntimeState;
+    }>(`/api/runtime/${bucket}/sessions`, {
+      method: "POST",
+      body: JSON.stringify({ title: title ?? null, prompt: prompt ?? null }),
+    }),
+
+  /** Resume a session into a managed pane. Refuses (409) if any claude is
+   *  still alive on the transcript — there is no takeover. */
+  runtimeControl: (bucket: string, sessionId: string) =>
     jsonFetch<RuntimeState>(`/api/runtime/${bucket}/${sessionId}/control`, {
       method: "POST",
-      body: JSON.stringify({ allow_takeover: allowTakeover }),
+      body: JSON.stringify({}),
     }),
   pendingList: (bucket: string, sessionId: string) =>
     jsonFetch<{ pending: PendingPrompt[] }>(
@@ -332,6 +365,17 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ choice }),
     }),
+  runtimeRelease: (bucket: string, sessionId: string) =>
+    jsonFetch<{
+      released: boolean;
+      reason?: string;
+      zellij_session?: string;
+      pane_id?: string;
+      /** Processes that had to be signalled because closing the pane left
+       *  them running — an orphan keeps writing to the transcript. */
+      reaped_pids?: number[];
+      surviving_pids?: number[];
+    }>(`/api/runtime/${bucket}/${sessionId}/release`, { method: "POST" }),
   runtimeSetMode: (bucket: string, sessionId: string, mode: PermissionMode) =>
     jsonFetch<{ ok: boolean; mode: PermissionMode }>(
       `/api/runtime/${bucket}/${sessionId}/mode`,
@@ -339,9 +383,10 @@ export const api = {
     ),
 };
 
-/** Claude's permission modes. `manual`/`accept_edits`/`plan` are reachable
- *  from the TUI's Shift+Tab cycle; `auto`/`dont_ask`/`bypass` are launch-time
- *  `--permission-mode` choices we can display but not switch into. */
+/** Claude's permission modes. Everything except `bypass` is reachable from
+ *  the TUI's Shift+Tab cycle — which modes the cycle actually visits varies
+ *  by claude build, so the server presses-and-verifies rather than assuming,
+ *  and reports what the loop contained if a mode turns out to be missing. */
 export type PermissionMode =
   | "manual"
   | "accept_edits"
@@ -356,6 +401,14 @@ export interface RuntimeState {
   reason: string | null;
   zellij_session: string | null;
   pane_id: string | null;
+  /** `<project>-<session>` as shown on the zellij tab and pane. */
+  pane_title: string | null;
+  /** Name of the zellij tab holding the pane. Recorded when the tab is
+   *  created — zellij can list tab names and pane ids but never maps one to
+   *  the other, so this is null for panes adopted from an older layout. */
+  zellij_tab: string | null;
+  /** Paste-in-a-terminal command to watch this very pane. */
+  attach_command: string | null;
   external_pid: number | null;
   busy: boolean;
   /** Present when the managed claude TUI is blocked on an interactive

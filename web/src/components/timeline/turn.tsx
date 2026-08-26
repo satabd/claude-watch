@@ -24,6 +24,7 @@ import { useApp } from "@/store/app";
 import { api, type TranscriptEvent, type ToolResult } from "@/lib/api";
 import { cn, formatTime } from "@/lib/utils";
 import { toast } from "sonner";
+import { copyText } from "@/lib/clipboard";
 
 interface Props {
   event: TranscriptEvent;
@@ -360,7 +361,7 @@ function AssistantActionRow({
   const onCopy = async () => {
     if (!text || !text.trim()) return;
     try {
-      await navigator.clipboard.writeText(text);
+      await copyText(text);
       toast.success("Copied message");
     } catch {
       toast.error("Clipboard write failed");

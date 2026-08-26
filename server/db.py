@@ -258,6 +258,28 @@ def _migration_v6(conn: sqlite3.Connection) -> None:
     )
 
 
+# v7 — remember which Zellij *tab* holds a session's pane. Zellij can report
+# tab names and pane ids, but nothing maps one to the other
+# (`dump-layout` lists panes without their ids), so the only reliable record
+# is the name we chose when we created the tab.
+def _migration_v7(conn: sqlite3.Connection) -> None:
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(runtime_bindings)")}
+    if "tab_name" not in cols:
+        conn.execute("ALTER TABLE runtime_bindings ADD COLUMN tab_name TEXT")
+
+
+# v8 — record the pid we spawned. Ownership used to be re-derived on every
+# request from pane titles and process scans, which is guessing: a title is a
+# string anyone can produce, and a surviving pane says nothing about whether
+# the claude inside it is still alive. Storing the pid makes "managed" a fact
+# we wrote down — this session is ours iff THIS pid is still running and still
+# a claude — and it bounds teardown to the one process we started.
+def _migration_v8(conn: sqlite3.Connection) -> None:
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(runtime_bindings)")}
+    if "pid" not in cols:
+        conn.execute("ALTER TABLE runtime_bindings ADD COLUMN pid INTEGER")
+
+
 # Ordered list of (version, sql_or_callable, description). The last entry's
 # version number IS the current schema version.
 MIGRATIONS: list[tuple[int, Callable[[sqlite3.Connection], None], str]] = [
@@ -276,6 +298,8 @@ MIGRATIONS: list[tuple[int, Callable[[sqlite3.Connection], None], str]] = [
         "provider_session_skill_version",
     ),
     (6, _migration_v6, "runtime_bindings + pending_prompts (Zellij control)"),
+    (7, _migration_v7, "runtime_bindings: add tab_name"),
+    (8, _migration_v8, "runtime_bindings: add pid (recorded ownership)"),
 ]
 
 
@@ -939,15 +963,23 @@ def runtime_binding_get(claude_session_id: str) -> dict[str, Any] | None:
 
 
 def runtime_binding_put(
-    claude_session_id: str, zellij_session: str, pane_id: str, cwd: str | None
+    claude_session_id: str,
+    zellij_session: str,
+    pane_id: str,
+    cwd: str | None,
+    tab_name: str | None = None,
+    pid: int | None = None,
 ) -> None:
     now = int(time.time() * 1000)
     with _lock, _conn() as c:
         c.execute(
             "INSERT OR REPLACE INTO runtime_bindings "
-            "(claude_session_id, zellij_session, pane_id, cwd, created_ms, "
-            " last_verified_ms) VALUES (?, ?, ?, ?, ?, ?)",
-            (claude_session_id, zellij_session, pane_id, cwd, now, now),
+            "(claude_session_id, zellij_session, pane_id, cwd, tab_name, pid, "
+            " created_ms, last_verified_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                claude_session_id, zellij_session, pane_id, cwd, tab_name, pid,
+                now, now,
+            ),
         )
 
 

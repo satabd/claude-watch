@@ -217,6 +217,31 @@ def list_projects() -> list[ProjectMeta]:
     return projects
 
 
+def project_cwd(bucket: str) -> str | None:
+    """The working directory a bucket represents, or None if unknowable.
+
+    Reads `cwd` out of one transcript rather than rebuilding every project
+    (``list_projects`` parses every session file, which is far too much work
+    to answer one question). Falls back to decoding the bucket name, which is
+    lossy — separators were flattened — so the result is verified to be a real
+    directory before it is handed to anything that would run a process in it.
+    """
+    if bucket.startswith("remote:"):
+        return None  # runtime control is local-only
+    bucket_dir = PROJECTS_ROOT / bucket
+    if not bucket_dir.is_dir():
+        return None
+    for f in sorted(
+        bucket_dir.glob("*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True
+    ):
+        meta = _read_first_meta_line(f) or {}
+        cwd = meta.get("cwd")
+        if cwd and Path(cwd).is_dir():
+            return cwd
+    decoded = _decode_bucket(bucket)
+    return decoded if Path(decoded).is_dir() else None
+
+
 def find_session(bucket: str, session_id: str) -> Path | None:
     if bucket.startswith("remote:"):
         # remote:<host_name>:<original_bucket>

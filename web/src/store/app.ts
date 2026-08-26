@@ -5,6 +5,7 @@ import type {
   PromptWriterContextMode,
   PromptWriterMode,
   ReviewEvidenceFlags,
+  RuntimeState,
   SkillId,
   ScratchpadItem,
   SessionFull,
@@ -80,8 +81,21 @@ interface AppState {
   filterTool: string | null; // null = all; otherwise tool name (Bash/Edit/...)
   setFilterTool: (t: string | null) => void;
 
+  /** Live Zellij runtime for the selected session. Owned by the Composer,
+   *  which is the only thing polling it; mirrored here so the status bar can
+   *  show where the pane lives without a second poll loop. */
+  runtime: RuntimeState | null;
+  setRuntime: (r: RuntimeState | null) => void;
+
   // session AI summary
-  summary: { sessionId: string; text: string; model: string; cached: boolean } | null;
+  summary: {
+    sessionId: string;
+    text: string;
+    model: string;
+    cached: boolean;
+    /** "pane" | "resume" | "transcript" | "cache" — how it was produced. */
+    source?: string;
+  } | null;
   setSummary: (s: AppState["summary"]) => void;
   summaryOpen: boolean;
   setSummaryOpen: (b: boolean) => void;
@@ -255,6 +269,9 @@ export const useApp = create<AppState>((set) => ({
   setFilterRoles: (filterRoles) => set({ filterRoles }),
   filterTool: null,
   setFilterTool: (filterTool) => set({ filterTool }),
+
+  runtime: null,
+  setRuntime: (runtime) => set({ runtime }),
 
   summary: null,
   setSummary: (summary) => set({ summary }),

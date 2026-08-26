@@ -127,8 +127,39 @@ def test_cascade_delete_messages_when_thread_deleted(isolated_db):
     assert db.list_review_messages(t["id"]) == []
 
 
-def test_schema_is_at_v6(isolated_db):
-    assert db.schema_version() == 6
+def test_schema_is_at_v8(isolated_db):
+    assert db.schema_version() == 8
+
+
+def test_runtime_binding_records_the_pid_we_spawned(isolated_db):
+    """v8: ownership is a fact we wrote down, not something re-derived from
+    pane titles on every request."""
+    db.runtime_binding_put("sid", "rumailahub", "terminal_2", cwd="/x",
+                           tab_name="rumailahub-a1b2c3d4", pid=4242)
+    assert db.runtime_binding_get("sid")["pid"] == 4242
+
+
+def test_runtime_binding_pid_defaults_to_null(isolated_db):
+    """Rows written before v8 have no pid; the controller upgrades them in
+    place rather than treating them as managed on faith."""
+    db.runtime_binding_put("sid", "rumailahub", "terminal_2", cwd="/x")
+    assert db.runtime_binding_get("sid")["pid"] is None
+
+
+def test_runtime_binding_round_trips_tab_name(isolated_db):
+    """v7 added tab_name — zellij never maps a pane id back to its tab, so
+    the name we chose at creation is the only record of where the pane is."""
+    db.runtime_binding_put("sid", "rumailahub", "terminal_2", cwd="/x",
+                           tab_name="rumailahub-a1b2c3d4")
+    row = db.runtime_binding_get("sid")
+    assert row["zellij_session"] == "rumailahub"
+    assert row["tab_name"] == "rumailahub-a1b2c3d4"
+
+
+def test_runtime_binding_tab_name_is_optional(isolated_db):
+    """Adopted panes from the pre-v7 layout have no known tab."""
+    db.runtime_binding_put("sid", "cw-a1b2c3d4", "terminal_1", cwd=None)
+    assert db.runtime_binding_get("sid")["tab_name"] is None
 
 
 def test_skill_metadata_round_trips(isolated_db):

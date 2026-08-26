@@ -30,6 +30,15 @@ import { useApp } from "@/store/app";
 import { api, type TranscriptEvent } from "@/lib/api";
 import { toast } from "sonner";
 import { cn, formatTime, shortPath } from "@/lib/utils";
+import { copyText } from "@/lib/clipboard";
+
+/** Where a fresh summary came from — worth saying out loud, because the
+ *  "pane" route adds a real turn to the running session's timeline. */
+const SUMMARY_SOURCE_TOAST: Record<string, string> = {
+  pane: "Summarized by the live session",
+  resume: "Summarized by resuming the session",
+  transcript: "Summarized from the transcript",
+};
 
 export function SessionToolbar() {
   const session = useApp((s) => s.session);
@@ -180,9 +189,13 @@ export function SessionToolbar() {
     if (busySummary) return;
     setBusySummary(true);
     try {
+      // The transcript is still sent — it is the cache key, and the fallback
+      // if the session can't be reached — but the server prefers asking the
+      // session itself, which already holds the conversation.
       const transcript = buildCompactTranscript(turns);
       const r = await api.summarizeSession({
         session_id: session.meta.session_id,
+        bucket: session.meta.bucket,
         transcript,
         force,
       });
@@ -191,9 +204,14 @@ export function SessionToolbar() {
         text: r.summary,
         model: r.model,
         cached: r.cached,
+        source: r.source,
       });
       setSummaryOpen(true);
-      toast.success(r.cached ? "Summary loaded (cached)" : "Summary generated");
+      toast.success(
+        r.cached
+          ? "Summary loaded (cached)"
+          : SUMMARY_SOURCE_TOAST[r.source] ?? "Summary generated"
+      );
     } catch (e: any) {
       toast.error(e?.message ?? "Summarize failed");
     } finally {
@@ -431,6 +449,14 @@ export function SessionToolbar() {
             <span className="font-medium text-foreground">Session summary</span>
             <span className="font-mono">{summary.model.replace(/^claude-/, "")}</span>
             {summary.cached && <Badge variant="muted">cached</Badge>}
+            {summary.source === "pane" && (
+              <Badge
+                variant="info"
+                title="Written by the running session itself — it appears as a turn in the timeline too"
+              >
+                in-session
+              </Badge>
+            )}
             <button
               onClick={() => onSummarize(true)}
               className="ms-auto text-muted-foreground hover:text-foreground"
@@ -670,7 +696,7 @@ function ExportMenu({
   const copyPrompts = async () => {
     const md = renderPromptsMarkdown(session.meta, turns);
     try {
-      await navigator.clipboard.writeText(md);
+      await copyText(md);
       toast.success("Prompts copied");
     } catch {
       toast.error("Clipboard write failed");
@@ -680,7 +706,7 @@ function ExportMenu({
   const copyFull = async () => {
     const md = renderSessionMarkdown(session.meta, turns);
     try {
-      await navigator.clipboard.writeText(md);
+      await copyText(md);
       toast.success("Transcript copied");
     } catch {
       toast.error("Clipboard write failed");

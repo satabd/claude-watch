@@ -15,7 +15,10 @@ import {
   GitBranch,
   FolderTree,
   Inbox,
+  Loader2,
+  Plus,
 } from "lucide-react";
+import { toast } from "sonner";
 
 export function Sidebar() {
   const projects = useApp((s) => s.projects);
@@ -27,6 +30,11 @@ export function Sidebar() {
   const projectsLoaded = useApp((s) => s.projectsLoaded);
   const setProjectsLoaded = useApp((s) => s.setProjectsLoaded);
   const clearSelection = useApp((s) => s.clearSelection);
+
+  const refreshProjects = React.useCallback(
+    () => api.listProjects().then(setProjects).catch(() => {}),
+    [setProjects]
+  );
 
   React.useEffect(() => {
     api
@@ -83,6 +91,7 @@ export function Sidebar() {
                 selectedBucket={selectedBucket}
                 selectedSessionId={selectedSessionId}
                 onSelect={selectSession}
+                onCreated={refreshProjects}
               />
             ))
           )}
@@ -148,14 +157,151 @@ function SidebarEmptyState({ onOpenSettings }: { onOpenSettings: () => void }) {
   );
 }
 
+/** "New Claude Session" — the front door.
+ *
+ *  claude-watch starts the session and picks its id, so it is managed from
+ *  birth: owned, in a named pane, with its pid recorded. Sessions started
+ *  this way never go through the ownership guesswork that discovering an
+ *  anonymous `claude` requires.
+ *
+ *  The session is only selectable once Claude has written its transcript —
+ *  the sidebar is built from those files. That is near-instant in a project
+ *  Claude has already been trusted in, which is every project listed here,
+ *  but we poll rather than assume and say so if it does not arrive.
+ */
+function NewSessionButton({
+  bucket,
+  onSelect,
+  onCreated,
+}: {
+  bucket: string;
+  onSelect: (b: string, s: string) => void;
+  onCreated: () => Promise<void>;
+}) {
+  const [open, setOpen] = React.useState(false);
+  const [prompt, setPrompt] = React.useState("");
+  const [busy, setBusy] = React.useState(false);
+
+  const create = async () => {
+    if (busy) return;
+    setBusy(true);
+    try {
+      const r = await api.newSession(bucket, prompt.trim() || undefined);
+      setPrompt("");
+      setOpen(false);
+      await onCreated();
+      if (r.transcript_ready) {
+        onSelect(r.bucket, r.session_id);
+        toast.success("New session ready");
+        return;
+      }
+      if (r.blocked_on) {
+        toast.error(
+          `Claude is asking before it can start: "${r.blocked_on.question}" — ` +
+            `answer it in \`${r.attach_command ?? "the pane"}\`.`
+        );
+        return;
+      }
+      // Started but not yet written to. Poll, then select it when it lands.
+      for (let i = 0; i < 10; i++) {
+        await new Promise((res) => setTimeout(res, 1000));
+        await onCreated();
+        const found = useApp
+          .getState()
+          .projects.some(
+            (p) =>
+              p.bucket === r.bucket &&
+              p.sessions.some((x) => x.session_id === r.session_id)
+          );
+        if (found) {
+          onSelect(r.bucket, r.session_id);
+          toast.success("New session ready");
+          return;
+        }
+      }
+      toast.message(
+        "Session started in Zellij. It appears here once it has its first turn — " +
+          `send it something from \`${r.attach_command ?? "the pane"}\`.`
+      );
+    } catch (err: any) {
+      toast.error(err?.detail?.reason ?? err?.message ?? "Could not start a session");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (!open) {
+    return (
+      <button
+        onClick={(e) => {
+          e.stopPropagation();
+          setOpen(true);
+        }}
+        title="Start a new Claude session in this project"
+        aria-label="New Claude session in this project"
+        className="mr-1 shrink-0 rounded p-1 text-muted-foreground opacity-0 transition-opacity hover:bg-accent hover:text-foreground focus:opacity-100 group-hover/row:opacity-100"
+      >
+        <Plus className="h-3.5 w-3.5" />
+      </button>
+    );
+  }
+
+  return (
+    <div className="mr-1 flex min-w-0 flex-1 items-center gap-1">
+      <input
+        autoFocus
+        value={prompt}
+        disabled={busy}
+        onChange={(e) => setPrompt(e.target.value)}
+        onClick={(e) => e.stopPropagation()}
+        onKeyDown={(e) => {
+          e.stopPropagation();
+          if (e.key === "Enter") void create();
+          if (e.key === "Escape") {
+            setOpen(false);
+            setPrompt("");
+          }
+        }}
+        placeholder="First prompt…"
+        dir="auto"
+        className="min-w-0 flex-1 rounded border border-border bg-background px-1.5 py-0.5 text-[11px] outline-none focus:border-primary/50"
+      />
+      <button
+        onClick={(e) => {
+          e.stopPropagation();
+          void create();
+        }}
+        disabled={busy}
+        title="Start the session and send this as its first prompt"
+        className="shrink-0 rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground disabled:opacity-50"
+      >
+        {busy ? (
+          <Loader2 className="h-3.5 w-3.5 animate-spin" />
+        ) : (
+          <Plus className="h-3.5 w-3.5" />
+        )}
+      </button>
+    </div>
+  );
+}
+
+
 interface NodeProps {
   node: ProjectNode;
   selectedBucket: string | null;
   selectedSessionId: string | null;
   onSelect: (b: string, s: string) => void;
+  /** Re-read the project list so a freshly created session shows up. */
+  onCreated: () => Promise<void>;
 }
 
-function ProjectTreeNode({ node, selectedBucket, selectedSessionId, onSelect }: NodeProps) {
+function ProjectTreeNode({
+  node,
+  selectedBucket,
+  selectedSessionId,
+  onSelect,
+  onCreated,
+}: NodeProps) {
   const { project, children, isWorktree, relativeName, depth } = node;
   const isSshBucket = project.bucket.startsWith("ssh-");
   const isSelfSelected = selectedBucket === project.bucket;
@@ -201,9 +347,10 @@ function ProjectTreeNode({ node, selectedBucket, selectedSessionId, onSelect }: 
 
   return (
     <div className={cn("rounded-md", isSelfSelected && !hasChildren && "bg-accent/40")}>
+      <div className="group/row flex w-full items-center">
       <button
         onClick={() => setOpen((o) => !o)}
-        className="group/h flex w-full items-center gap-1.5 rounded px-2 py-1.5 text-left text-[12px] font-medium hover:bg-accent/40"
+        className="group/h flex min-w-0 flex-1 items-center gap-1.5 rounded px-2 py-1.5 text-left text-[12px] font-medium hover:bg-accent/40"
         title={project.cwd ?? project.display_name}
       >
         <ChevronRight
@@ -231,6 +378,14 @@ function ProjectTreeNode({ node, selectedBucket, selectedSessionId, onSelect }: 
           </span>
         )}
       </button>
+      {!isSshBucket && (
+        <NewSessionButton
+          bucket={project.bucket}
+          onSelect={onSelect}
+          onCreated={onCreated}
+        />
+      )}
+      </div>
 
       {open && (
         <div className="space-y-0.5 pb-0.5 ps-3 pe-1">
@@ -274,6 +429,7 @@ function ProjectTreeNode({ node, selectedBucket, selectedSessionId, onSelect }: 
                   selectedBucket={selectedBucket}
                   selectedSessionId={selectedSessionId}
                   onSelect={onSelect}
+                  onCreated={onCreated}
                 />
               ))}
             </div>

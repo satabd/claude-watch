@@ -42,6 +42,7 @@ import {
 import { AlertTriangle, Sparkle } from "lucide-react";
 import { cn, formatRelative } from "@/lib/utils";
 import { toast } from "sonner";
+import { copyText } from "@/lib/clipboard";
 
 const MODE_LABELS: Record<PromptWriterMode, { label: string; hint: string }> = {
   improve: { label: "Improve Prompt", hint: "Polish wording, fix grammar, keep intent" },
@@ -240,7 +241,7 @@ export function PromptWriter() {
   const onCopy = async () => {
     if (!draft) return;
     try {
-      await navigator.clipboard.writeText(draft.generated_prompt);
+      await copyText(draft.generated_prompt);
       setCopied(true);
       setTimeout(() => setCopied(false), 1200);
       toast.success("Copied");

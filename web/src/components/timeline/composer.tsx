@@ -3,13 +3,16 @@ import {
   Loader2,
   Pencil,
   PenLine,
+  PowerOff,
   Send,
   ShieldAlert,
   SlidersHorizontal,
   Square,
+  TerminalSquare,
   Trash2,
   X,
 } from "lucide-react";
+import { copyText } from "@/lib/clipboard";
 import { Button } from "@/components/ui/button";
 import {
   api,
@@ -18,33 +21,43 @@ import {
   type RuntimeState,
 } from "@/lib/api";
 import { cn } from "@/lib/utils";
+import { useApp } from "@/store/app";
 import { toast } from "sonner";
 
-/** Chat-style composer + pending-prompt queue anchored under the timeline.
+/** Chat-style composer anchored under the timeline.
  *
- *  Workflow (deliberately explicit; nothing auto-sends):
- *    Write Prompt -> compose/edit -> Queue -> pending card -> Send
- *  Send ensures a managed Zellij runtime first (asking for confirmation
- *  when that would take over an external claude TUI), then delivers the
- *  prompt through the pane. Double-send is prevented server-side; the
- *  user turn then arrives via the normal JSONL -> SSE read path.
+ *  Only rendered for sessions claude-watch can drive. Sending resumes the
+ *  session into a Zellij pane if it is not already in one, then types into
+ *  that pane; the user turn comes back via the normal JSONL -> SSE read path.
+ *
+ *  A session someone else is running is view-only — the server refuses with a
+ *  409 and the reason lands in a toast. There is no takeover: see CLAUDE.md,
+ *  "Ownership".
+ *
+ *  The prompt is recorded server-side as a "pending" row a beat before it is
+ *  injected — that row is the atomic double-send guard, not a queue the user
+ *  has to shepherd. Rows only stay visible when a send *failed*, so the text
+ *  is never lost; the happy path never shows a card.
  */
+/** `sendingId` value used while the *draft* is being turned into a row —
+ *  before it has a real id. Negative so it can never collide with one. */
+const DRAFT_SENDING = -1;
+
 export function Composer({ bucket, sessionId }: { bucket: string; sessionId: string }) {
-  const [runtime, setRuntime] = React.useState<RuntimeState | null>(null);
+  // The composer owns the poll loop; the store copy is what the status bar
+  // reads, so there is exactly one `zellij dump-screen` per interval.
+  const runtime = useApp((s) => s.runtime);
+  const setRuntime = useApp((s) => s.setRuntime);
   const [pending, setPending] = React.useState<PendingPrompt[]>([]);
   const [composing, setComposing] = React.useState(false);
   const [draft, setDraft] = React.useState("");
   const [editingId, setEditingId] = React.useState<number | null>(null);
   const [editText, setEditText] = React.useState("");
   const [sendingId, setSendingId] = React.useState<number | null>(null);
-  const [confirmTakeover, setConfirmTakeover] = React.useState<{
-    promptId: number;
-    reason: string;
-  } | null>(null);
 
   const refreshRuntime = React.useCallback(() => {
     api.runtimeState(bucket, sessionId).then(setRuntime).catch(() => setRuntime(null));
-  }, [bucket, sessionId]);
+  }, [bucket, sessionId, setRuntime]);
 
   const refreshPending = React.useCallback(() => {
     api.pendingList(bucket, sessionId).then(setPending).catch(() => {});
@@ -54,10 +67,16 @@ export function Composer({ bucket, sessionId }: { bucket: string; sessionId: str
     setComposing(false);
     setDraft("");
     setEditingId(null);
-    setConfirmTakeover(null);
+    // Drop the previous session's runtime immediately: the status bar reads
+    // this, and showing another session's pane for a poll interval would be
+    // worse than showing nothing.
+    setRuntime(null);
     refreshRuntime();
     refreshPending();
-  }, [bucket, sessionId, refreshRuntime, refreshPending]);
+  }, [bucket, sessionId, refreshRuntime, refreshPending, setRuntime]);
+
+  // The status bar outlives this component, so leave nothing behind.
+  React.useEffect(() => () => setRuntime(null), [setRuntime]);
 
   // Poll fast while a managed session is live (so the working indicator and
   // permission dialogs feel immediate), slowly otherwise to keep the cost of
@@ -69,17 +88,26 @@ export function Composer({ bucket, sessionId }: { bucket: string; sessionId: str
     return () => clearInterval(t);
   }, [refreshRuntime, pollMs]);
 
-  const queuePrompt = async () => {
+  /** Type -> Send in one action: record the guard row, then deliver it. */
+  const sendDraft = async () => {
     const text = draft.trim();
-    if (!text) return;
+    if (!text || sendingId === DRAFT_SENDING) return;
+    setSendingId(DRAFT_SENDING);
+    let created: PendingPrompt;
     try {
-      await api.pendingCreate(bucket, sessionId, text);
-      setDraft("");
-      setComposing(false);
-      refreshPending();
+      created = await api.pendingCreate(bucket, sessionId, text);
     } catch (e: any) {
-      toast.error(e?.message ?? "Failed to queue prompt");
+      setSendingId(null);
+      toast.error(e?.message ?? "Failed to send prompt");
+      return;
     }
+    // Clear the box optimistically — on failure the row stays on screen as a
+    // card with the full text, so nothing the user typed can be lost.
+    setDraft("");
+    setComposing(false);
+    setSendingId(null);
+    refreshPending();
+    await sendPrompt(created.id);
   };
 
   const saveEdit = async (id: number) => {
@@ -103,28 +131,18 @@ export function Composer({ bucket, sessionId }: { bucket: string; sessionId: str
     }
   };
 
-  const sendPrompt = async (id: number, allowTakeover = false) => {
+  const sendPrompt = async (id: number) => {
     setSendingId(id);
-    setConfirmTakeover(null);
     try {
       if (runtime?.state !== "managed") {
-        try {
-          await api.runtimeControl(bucket, sessionId, allowTakeover);
-        } catch (e: any) {
-          if (e?.detail?.needs_takeover_confirmation) {
-            setConfirmTakeover({
-              promptId: id,
-              reason:
-                runtime?.reason ??
-                "An external claude TUI owns this session. Taking control closes it and resumes the session under claude-watch.",
-            });
-            return;
-          }
-          throw e;
-        }
+        // Resumes only when nothing else is alive on the transcript; a 409
+        // carries the reason straight to the toast below.
+        await api.runtimeControl(bucket, sessionId);
       }
       await api.pendingSend(bucket, sessionId, id);
       toast.success("Prompt sent to Claude");
+      // A delivered prompt leaves the pending list server-side, so the card
+      // disappears on its own — no queue to tidy up.
       refreshPending();
       refreshRuntime();
     } catch (e: any) {
@@ -133,6 +151,53 @@ export function Composer({ bucket, sessionId }: { bucket: string; sessionId: str
       refreshPending();
     } finally {
       setSendingId(null);
+    }
+  };
+
+  /** Resume the session into a Zellij pane without sending anything, so it
+   *  can be attached to and watched. Same guarded path a send takes. */
+  const [opening, setOpening] = React.useState(false);
+  const openRuntime = async () => {
+    setOpening(true);
+    try {
+      const st = await api.runtimeControl(bucket, sessionId);
+      setRuntime(st);
+      toast.success(
+        st.attach_command
+          ? `Running in zellij — ${st.attach_command}`
+          : "Session is now managed"
+      );
+    } catch (e: any) {
+      toast.error(e?.detail?.reason ?? e?.message ?? "Could not resume the session");
+      refreshRuntime();
+    } finally {
+      setOpening(false);
+    }
+  };
+
+  /** Close the pane and confirm its claude actually exited. */
+  const [releasing, setReleasing] = React.useState(false);
+  const release = async () => {
+    setReleasing(true);
+    try {
+      const r = await api.runtimeRelease(bucket, sessionId);
+      if (r.surviving_pids?.length) {
+        toast.error(
+          `Pane closed, but claude ${r.surviving_pids.join(", ")} is still ` +
+            "running and writing to this transcript."
+        );
+      } else if (r.reaped_pids?.length) {
+        toast.success(
+          `Pane closed (claude ${r.reaped_pids.join(", ")} had to be signalled).`
+        );
+      } else {
+        toast.success("Pane closed");
+      }
+    } catch (e: any) {
+      toast.error(e?.message ?? "Could not close the pane");
+    } finally {
+      setReleasing(false);
+      refreshRuntime();
     }
   };
 
@@ -188,6 +253,42 @@ export function Composer({ bucket, sessionId }: { bucket: string; sessionId: str
             onChange={changeMode}
           />
         )}
+        {runtime?.attach_command && <AttachHint runtime={runtime} />}
+        {runtime?.state === "managed" && (
+          <button
+            type="button"
+            disabled={releasing}
+            onClick={release}
+            className="inline-flex items-center gap-1 rounded-md border border-border px-1.5 py-0.5 text-[11px] text-muted-foreground transition-colors hover:border-red-400/60 hover:text-red-500 disabled:opacity-50"
+            title="Close the zellij pane and stop the claude running in it"
+          >
+            {releasing ? (
+              <Loader2 className="h-3 w-3 animate-spin" />
+            ) : (
+              <PowerOff className="h-3 w-3" />
+            )}
+            Close pane
+          </button>
+        )}
+        {runtime !== null &&
+          runtime.state !== "managed" &&
+          runtime.controllable &&
+          runtime.state !== "external_idle" && (
+            <button
+              type="button"
+              disabled={opening}
+              onClick={() => openRuntime()}
+              className="inline-flex items-center gap-1 rounded-md border border-border px-1.5 py-0.5 text-[11px] text-muted-foreground transition-colors hover:text-foreground disabled:opacity-50"
+              title="Resume this session in a Zellij pane you can attach to"
+            >
+              {opening ? (
+                <Loader2 className="h-3 w-3 animate-spin" />
+              ) : (
+                <TerminalSquare className="h-3 w-3" />
+              )}
+              Resume in claude-watch
+            </button>
+          )}
       </div>
 
       {runtime?.awaiting_input && (
@@ -229,7 +330,7 @@ export function Composer({ bucket, sessionId }: { bucket: string; sessionId: str
           className="mt-2 rounded-lg border border-primary/25 bg-primary/5 p-3"
         >
           <div className="mb-1 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
-            Pending prompt
+            Not delivered — retry or discard
           </div>
           {editingId === p.id ? (
             <>
@@ -254,64 +355,38 @@ export function Composer({ bucket, sessionId }: { bucket: string; sessionId: str
               <div dir="auto" className="whitespace-pre-wrap break-words text-sm">
                 {p.text}
               </div>
-              {confirmTakeover?.promptId === p.id ? (
-                <div className="mt-2 rounded-md border border-amber-500/30 bg-amber-500/10 p-2 text-[12px]">
-                  <div className="flex items-start gap-1.5 text-amber-700 dark:text-amber-300">
-                    <ShieldAlert className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-                    {confirmTakeover.reason}
-                  </div>
-                  <div className="mt-2 flex justify-end gap-1.5">
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      onClick={() => setConfirmTakeover(null)}
-                    >
-                      Cancel
-                    </Button>
-                    <Button
-                      size="sm"
-                      variant="destructive"
-                      disabled={sendingId === p.id}
-                      onClick={() => sendPrompt(p.id, true)}
-                    >
-                      Take over & send
-                    </Button>
-                  </div>
-                </div>
-              ) : (
-                <div className="mt-2 flex justify-end gap-1.5">
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    onClick={() => discard(p.id)}
-                    title="Discard this pending prompt"
-                  >
-                    <Trash2 className="mr-1 h-3 w-3" /> Discard
-                  </Button>
-                  <Button
-                    variant="secondary"
-                    size="sm"
-                    onClick={() => {
-                      setEditingId(p.id);
-                      setEditText(p.text);
-                    }}
-                  >
-                    <Pencil className="mr-1 h-3 w-3" /> Edit
-                  </Button>
-                  <Button
-                    size="sm"
-                    disabled={sendingId === p.id || controlUnavailable}
-                    onClick={() => sendPrompt(p.id)}
-                  >
-                    {sendingId === p.id ? (
-                      <Loader2 className="mr-1 h-3 w-3 animate-spin" />
-                    ) : (
-                      <Send className="mr-1 h-3 w-3" />
-                    )}
-                    Send
-                  </Button>
-                </div>
-              )}
+              <div className="mt-2 flex justify-end gap-1.5">
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => discard(p.id)}
+                  title="Discard this pending prompt"
+                >
+                  <Trash2 className="mr-1 h-3 w-3" /> Discard
+                </Button>
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  onClick={() => {
+                    setEditingId(p.id);
+                    setEditText(p.text);
+                  }}
+                >
+                  <Pencil className="mr-1 h-3 w-3" /> Edit
+                </Button>
+                <Button
+                  size="sm"
+                  disabled={sendingId === p.id || controlUnavailable}
+                  onClick={() => sendPrompt(p.id)}
+                >
+                  {sendingId === p.id ? (
+                    <Loader2 className="mr-1 h-3 w-3 animate-spin" />
+                  ) : (
+                    <Send className="mr-1 h-3 w-3" />
+                  )}
+                  Retry send
+                </Button>
+              </div>
             </>
           )}
         </div>
@@ -323,14 +398,22 @@ export function Composer({ bucket, sessionId }: { bucket: string; sessionId: str
             autoFocus
             value={draft}
             onChange={(e) => setDraft(e.target.value)}
-            placeholder="Write the prompt to queue for this Claude session…"
+            onKeyDown={(e) => {
+              // Enter inserts a newline (prompts are usually multi-line);
+              // Cmd/Ctrl+Enter is the send chord, same as the TUI composer.
+              if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+                e.preventDefault();
+                void sendDraft();
+              }
+            }}
+            placeholder="Write a prompt for this Claude session…"
             dir="auto"
             rows={Math.min(12, Math.max(3, draft.split("\n").length))}
             className="w-full resize-y rounded-md border border-border bg-background p-2 text-sm outline-none focus:border-primary/50"
           />
           <div className="mt-1.5 flex items-center justify-between">
             <span className="text-[11px] text-muted-foreground">
-              Queuing does not send — you review and press Send explicitly.
+              ⌘/Ctrl + Enter to send. Goes straight into the live Claude pane.
             </span>
             <div className="flex gap-1.5">
               <Button
@@ -343,8 +426,22 @@ export function Composer({ bucket, sessionId }: { bucket: string; sessionId: str
               >
                 <X className="mr-1 h-3 w-3" /> Cancel
               </Button>
-              <Button size="sm" disabled={!draft.trim()} onClick={queuePrompt}>
-                Queue prompt
+              <Button
+                size="sm"
+                disabled={!draft.trim() || sendingId !== null || controlUnavailable}
+                onClick={sendDraft}
+                title={
+                  controlUnavailable
+                    ? runtime?.reason ?? "Control unavailable"
+                    : "Send this prompt to the live Claude session"
+                }
+              >
+                {sendingId !== null ? (
+                  <Loader2 className="mr-1 h-3 w-3 animate-spin" />
+                ) : (
+                  <Send className="mr-1 h-3 w-3" />
+                )}
+                Send
               </Button>
             </div>
           </div>
@@ -359,7 +456,7 @@ export function Composer({ bucket, sessionId }: { bucket: string; sessionId: str
             title={
               controlUnavailable
                 ? runtime?.reason ?? "Control unavailable"
-                : "Compose a prompt for this session"
+                : "Write a prompt for this session"
             }
           >
             <PenLine className="mr-1.5 h-3.5 w-3.5" /> Write Prompt
@@ -440,6 +537,31 @@ function StatusChip({
   );
 }
 
+/** "This session lives in zellij — here's how to look at it." Claude Watch
+ *  always runs managed sessions inside a project-named zellij session, so
+ *  the attach command is stable and worth having one click away. */
+function AttachHint({ runtime }: { runtime: RuntimeState }) {
+  const cmd = runtime.attach_command!;
+  return (
+    <button
+      type="button"
+      onClick={async () => {
+        try {
+          await copyText(cmd);
+          toast.success(`Copied: ${cmd}`);
+        } catch (e: any) {
+          toast.error(e?.message ?? "Copy failed");
+        }
+      }}
+      className="inline-flex items-center gap-1 rounded-md border border-border px-1.5 py-0.5 text-[11px] text-muted-foreground transition-colors hover:text-foreground"
+      title={`Copy "${cmd}" — attaches a terminal to the zellij session holding this pane`}
+    >
+      <TerminalSquare className="h-3 w-3" />
+      <span className="font-mono">{runtime.pane_title ?? runtime.zellij_session}</span>
+    </button>
+  );
+}
+
 const MODE_LABELS: Record<PermissionMode, string> = {
   manual: "Manual",
   accept_edits: "Accept edits",
@@ -448,11 +570,11 @@ const MODE_LABELS: Record<PermissionMode, string> = {
   dont_ask: "Don't ask",
   bypass: "Bypass",
 };
-/** Switchable from the UI — these are the modes the TUI's Shift+Tab cycle
- *  visits. `auto` / `dont_ask` / `bypass` are launch-time
- *  `--permission-mode` choices: shown as a badge when active, but cycling
- *  cannot reach them, so we don't offer a button that would always fail. */
-const MODE_CHOICES: PermissionMode[] = ["manual", "accept_edits", "plan"];
+/** Switchable from the UI. `auto` leads because it is what claude-watch
+ *  launches its own sessions in. `bypass` is deliberately absent: it is never
+ *  in the Shift+Tab cycle, so a button for it would always fail — and landing
+ *  there by accident is not a mistake worth making easy. */
+const MODE_CHOICES: PermissionMode[] = ["auto", "manual", "accept_edits", "plan"];
 /** Modes that let Claude act without asking — worth flagging visually. */
 const PERMISSIVE_MODES: PermissionMode[] = ["dont_ask", "bypass"];
 
@@ -510,8 +632,9 @@ function ModeSelector({
               : "border-sky-500/40 bg-sky-500/10 text-sky-700 dark:text-sky-300"
           )}
           title={
-            `Session was started with --permission-mode ${mode}. ` +
-            "Shift+Tab cycling can't reach it; restart the session to change it."
+            `Session is in ${MODE_LABELS[mode!]} mode, which this claude ` +
+            "build's Shift+Tab cycle doesn't visit — restart the session " +
+            "with --permission-mode to change it."
           }
         >
           {MODE_LABELS[mode!]}

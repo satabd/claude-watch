@@ -6,12 +6,14 @@ import {
   GitBranch,
   Coins,
   Hash,
+  LayoutGrid,
   Terminal,
   Zap,
   Copy,
   Check,
 } from "lucide-react";
 import { useApp } from "@/store/app";
+import type { RuntimeState } from "@/lib/api";
 import { computeSessionStats, fmtCost, fmtTokens } from "@/lib/session-stats";
 import {
   Tooltip,
@@ -20,11 +22,13 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
+import { copyText } from "@/lib/clipboard";
 
 export function StatusBar() {
   const session = useApp((s) => s.session);
   const sseConnected = useApp((s) => s.sseConnected);
   const settings = useApp((s) => s.settings);
+  const runtime = useApp((s) => s.runtime);
   const stats = React.useMemo(() => computeSessionStats(session), [session]);
 
   const meta = session?.meta;
@@ -38,7 +42,7 @@ export function StatusBar() {
   const copySessionId = async () => {
     if (!sessionId) return;
     try {
-      await navigator.clipboard.writeText(sessionId);
+      await copyText(sessionId);
       setCopied(true);
       setTimeout(() => setCopied(false), 1200);
     } catch {}
@@ -88,6 +92,7 @@ export function StatusBar() {
               </TooltipContent>
             </Tooltip>
           )}
+          <ZellijItem runtime={runtime} />
         </Section>
 
         {/* Right cluster — turns / tokens / cost / model / live */}
@@ -187,6 +192,70 @@ export function StatusBar() {
         </div>
       </TooltipProvider>
     </footer>
+  );
+}
+
+/** Where this session physically lives: zellij session, tab, and pane id.
+ *
+ *  Session and tab are the two names you actually type or look for
+ *  (`zellij attach <session>`, then find the tab); the pane id is what the
+ *  server targets, so it is worth showing when something misbehaves. Clicking
+ *  copies the attach command rather than the label — that is the thing you
+ *  want in your paste buffer.
+ */
+function ZellijItem({ runtime }: { runtime: RuntimeState | null }) {
+  const [copied, setCopied] = React.useState(false);
+  if (!runtime?.zellij_session) return null;
+
+  const tab = runtime.zellij_tab ?? runtime.pane_title;
+  const cmd = runtime.attach_command ?? `zellij attach ${runtime.zellij_session}`;
+
+  const copy = async () => {
+    try {
+      await copyText(cmd);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1200);
+    } catch {}
+  };
+
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <button
+          onClick={copy}
+          className="flex items-center gap-1 rounded px-1.5 py-0.5 hover:bg-accent hover:text-foreground"
+        >
+          <LayoutGrid className="h-3 w-3" />
+          <span className="truncate max-w-[26ch]">
+            {runtime.zellij_session}
+            {tab && <span className="opacity-60"> / {tab}</span>}
+          </span>
+          {copied ? (
+            <Check className="h-3 w-3 text-emerald-500" />
+          ) : (
+            <Copy className="h-3 w-3 opacity-50" />
+          )}
+        </button>
+      </TooltipTrigger>
+      <TooltipContent>
+        <div className="space-y-0.5 text-[11px] leading-tight">
+          <div>
+            zellij session: <span className="font-mono">{runtime.zellij_session}</span>
+          </div>
+          {tab && (
+            <div>
+              tab: <span className="font-mono">{tab}</span>
+            </div>
+          )}
+          {runtime.pane_id && (
+            <div>
+              pane: <span className="font-mono">{runtime.pane_id}</span>
+            </div>
+          )}
+          <div className="pt-0.5 opacity-70">click to copy “{cmd}”</div>
+        </div>
+      </TooltipContent>
+    </Tooltip>
   );
 }
 
