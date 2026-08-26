@@ -19,6 +19,97 @@ TIMEOUT_SECONDS = 120
 REVIEW_TIMEOUT_SECONDS = 240  # reviews are larger; allow longer thinking
 
 
+# Lines codex emits that are noise, not the failure. The models-cache line in
+# particular is logged at ERROR level but is non-fatal — surfacing it as *the*
+# error sends people chasing a cache bug when they have actually run out of
+# quota.
+_NOISE_PATTERNS = (
+    "codex_models_manager::cache",
+    "failed to load models cache",
+)
+
+
+def _explain_failure(returncode: int, raw_err: str, raw_out: str) -> str:
+    """Turn a failed `codex exec` into one actionable sentence.
+
+    codex writes a banner (workdir/model/session id) and echoes the whole
+    prompt to stderr before the real error, which comes LAST. Naively
+    truncating the head of that blob hides the only line that matters, so we
+    pull out codex's own ``ERROR:`` lines first and fall back to the tail —
+    never the head — of the output.
+    """
+    blob = (raw_err or raw_out).strip()
+
+    # codex's own error lines, de-duplicated (it often prints them twice)
+    errors: list[str] = []
+    for ln in blob.splitlines():
+        ln = ln.strip()
+        if not ln or any(n in ln for n in _NOISE_PATTERNS):
+            continue
+        if ln.startswith("ERROR:") or ln.startswith("ERROR "):
+            text = ln.split(":", 1)[1].strip() if ln.startswith("ERROR:") else ln
+            if text not in errors:
+                errors.append(text)
+
+    detail = " ".join(errors) if errors else ""
+
+    # Structured API errors carry a JSON "detail"
+    if not detail:
+        m = re.search(r'"detail":\s*"([^"]+)"', blob)
+        if m:
+            detail = m.group(1)
+
+    if detail:
+        low = detail.lower()
+        if "usage limit" in low or "quota" in low or "rate limit" in low:
+            when = re.search(r"try again at ([0-9: ]+[AP]M)", detail)
+            # Deliberately no "switch provider" advice here: this same
+            # message serves the review/Discuss path, which is Codex-specific
+            # by design (it exists to get a second opinion from a *different*
+            # model), so that remedy would be wrong half the time.
+            return (
+                "Codex usage limit reached — your ChatGPT/Codex quota is "
+                "exhausted"
+                + (f"; try again at {when.group(1).strip()}" if when else "")
+                + "."
+            )
+        if "newer version of Codex" in detail or "not supported" in detail:
+            return (
+                "Codex CLI rejected the model. Run `npm install -g @openai/codex` "
+                f"to upgrade, then try again. Original error: {detail}"
+            )
+        if "not logged in" in low or "unauthorized" in low or "401" in low:
+            return "Codex is not signed in. Run `codex login` in a terminal."
+        return f"Codex: {detail}"
+
+    # Nothing recognisable — show the TAIL, where the real error lives.
+    # Line-based, not character-based: codex echoes the entire prompt as one
+    # very long line, so a character slice of the tail would paste chunks of
+    # the user's own prompt into the error toast. Real error lines are short;
+    # anything over ~300 chars is the prompt echo, not a diagnosis.
+    candidates = [
+        ln.strip()
+        for ln in blob.splitlines()
+        if ln.strip()
+        and len(ln.strip()) <= 300
+        and not any(n in ln for n in _NOISE_PATTERNS)
+    ]
+    tail = "\n".join(candidates[-4:])[-400:]
+    return f"codex exec failed (exit {returncode}): {tail or 'no output'}"
+
+
+def _is_terminal_failure(explained: str) -> bool:
+    """True when retrying as a cold start cannot possibly help (quota, auth)."""
+    low = explained.lower()
+    return (
+        "usage limit" in low
+        or "quota" in low
+        or "not signed in" in low
+        or "rate limit" in low
+    )
+
+
+
 async def run(prompt: str, *, model: str | None = None) -> tuple[str, str]:
     args = [
         resolve_bin("codex"),
@@ -58,18 +149,7 @@ async def run(prompt: str, *, model: str | None = None) -> tuple[str, str]:
     raw_err = stderr.decode("utf-8", errors="replace")
 
     if proc.returncode != 0:
-        msg = (raw_err or raw_out).strip()
-        # API model errors: extract the JSON detail
-        m = re.search(r'"detail":\s*"([^"]+)"', msg)
-        if m:
-            detail = m.group(1)
-            if "newer version of Codex" in detail or "not supported" in detail:
-                raise RuntimeError(
-                    f"Codex CLI rejected the model. Run `npm install -g @openai/codex` "
-                    f"to upgrade, then try again. Original error: {detail}"
-                )
-            raise RuntimeError(f"Codex API: {detail}")
-        raise RuntimeError(f"codex exec failed (exit {proc.returncode}): {msg[:500]}")
+        raise RuntimeError(_explain_failure(proc.returncode, raw_err, raw_out))
 
     # Try structured stderr first (codex 0.128+); fallback to stdout (older)
     answer = _extract_from_structured(raw_err)
@@ -259,16 +339,18 @@ async def run_review(
     raw_err = stderr.decode("utf-8", errors="replace")
 
     if proc.returncode != 0:
-        msg = (raw_err or raw_out).strip()[:1000]
+        # Same extraction as run(): codex puts the real error LAST, after a
+        # banner and the echoed prompt, so never truncate from the head.
+        explained = _explain_failure(proc.returncode, raw_err, raw_out)
         if session_id_in:
-            raise CodexResumeFailed(
-                f"codex resume failed (exit {proc.returncode}): {msg}"
-            )
-        # Mirror run() error mapping for cold starts.
-        m = re.search(r'"detail":\s*"([^"]+)"', msg)
-        if m:
-            raise RuntimeError(f"Codex API: {m.group(1)}")
-        raise RuntimeError(f"codex exec failed (exit {proc.returncode}): {msg}")
+            # A resume can fail because the stored provider session expired,
+            # which the caller retries as a cold start — but a quota/auth
+            # failure will fail identically on retry, so surface it directly
+            # instead of burning a second call.
+            if _is_terminal_failure(explained):
+                raise RuntimeError(explained)
+            raise CodexResumeFailed(explained)
+        raise RuntimeError(explained)
 
     answer = _extract_from_structured(raw_err)
     if not answer:
