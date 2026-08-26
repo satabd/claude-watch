@@ -382,7 +382,13 @@ def _pid_is_live_claude(pid: int) -> bool:
 
 
 def zellij_session_name(session_id: str, cwd: str | None = None) -> str:
-    return project_name(cwd) if cwd else legacy_session_name(session_id)
+    # fit_name: macOS's long $TMPDIR caps the IPC socket path, so long
+    # project names must be shortened deterministically or zellij refuses
+    # to create the session at all.
+    return (
+        zellij.fit_name(project_name(cwd)) if cwd
+        else legacy_session_name(session_id)
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -818,7 +824,7 @@ class ClaudeRuntimeController:
             # One zellij session per project, one *tab* per claude session:
             # a tab gives the TUI the session's full width, where a second
             # pane in a shared tab would halve it and wreck dialog rendering.
-            name = project_name(cwd)
+            name = zellij.fit_name(project_name(cwd))
             tab = pane_title(session_id, cwd, title)
             async with self._zellij_lock_for(name):
                 await zellij.create_session(name)
@@ -878,7 +884,7 @@ class ClaudeRuntimeController:
         to check for — the one-writer rule is satisfied by construction.
         """
         session_id = str(uuid.uuid4())
-        name = project_name(cwd)
+        name = zellij.fit_name(project_name(cwd))
         tab = pane_title(session_id, cwd, title)
         async with self._lock_for(session_id):
             async with self._zellij_lock_for(name):
@@ -943,7 +949,7 @@ class ClaudeRuntimeController:
         wrong (it nests a client); instead the existing session is reported so
         the user can attach, and the binding keeps the pid.
         """
-        name = project_name(cwd)
+        name = zellij.fit_name(project_name(cwd))
         tab = pane_title(session_id, cwd, title)
         _log.info(
             "session %s: pane gone, claude pid %s still alive",

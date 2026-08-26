@@ -39,12 +39,14 @@ from __future__ import annotations
 
 import asyncio
 import fcntl
+import hashlib
 import logging
 import os
 import pty
 import signal
 import struct
 import subprocess
+import tempfile
 import termios
 import time
 from dataclasses import dataclass
@@ -64,6 +66,69 @@ _PASTE_START = [27, 91, 50, 48, 48, 126]
 _PASTE_END = [27, 91, 50, 48, 49, 126]
 ENTER = [13]
 ESC = [27]
+
+
+# ---------------------------------------------------------------------------
+# Session-name length budget
+# ---------------------------------------------------------------------------
+#
+# Every zellij session gets a Unix IPC socket at
+#   $TMPDIR/zellij-<uid>/contract_version_<N>/<session-name>
+# and Unix socket paths are capped at ~104 bytes on macOS (108 on Linux).
+# macOS $TMPDIR alone is ~50 bytes of /var/folders noise, so a perfectly
+# reasonable project name like "phonemarketv2-launch-readiness" pushes the
+# path to 109 bytes and `zellij attach` fails with "the IPC socket path is
+# too long" before the session even exists. We measure the real prefix and
+# shorten only names that do not fit — deterministically, so recovery and
+# adoption by name keep working.
+
+_SOCKET_PATH_MAX = 103  # macOS sun_path is 104 incl. NUL; zellij checks 103
+
+
+def _socket_dir() -> str:
+    """The directory zellij will put session sockets in, as zellij computes
+    it: ZELLIJ_SOCKET_DIR override, else $TMPDIR/zellij-<uid>/<contract>."""
+    override = os.environ.get("ZELLIJ_SOCKET_DIR")
+    if override:
+        base = override
+    else:
+        tmp = os.environ.get("TMPDIR") or tempfile.gettempdir()
+        base = os.path.join(tmp, f"zellij-{os.getuid()}")
+    # Contract dir: read the real one when present; otherwise leave head-room
+    # for a two-digit version rather than guessing "1" and breaking on
+    # upgrade day.
+    try:
+        contracts = sorted(
+            d for d in os.listdir(base) if d.startswith("contract_version_")
+        )
+    except OSError:
+        contracts = []
+    contract = contracts[-1] if contracts else "contract_version_99"
+    return os.path.join(base, contract)
+
+
+def max_name_len() -> int:
+    # +1 for the "/" between dir and socket name
+    budget = _SOCKET_PATH_MAX - (len(_socket_dir().encode()) + 1)
+    # Never go below a usable floor; if the tmpdir itself is pathological
+    # the create call will still fail loudly with zellij's own error.
+    return max(budget, 12)
+
+
+def fit_name(name: str) -> str:
+    """Shorten `name` to fit the socket budget, deterministically.
+
+    A name that fits is returned unchanged — every existing session keeps
+    its exact name. One that does not fit keeps a readable prefix and gains
+    a short stable digest so two long names that share a prefix ("...-launch-
+    readiness" vs "...-launch-reload") cannot collapse into one session.
+    """
+    limit = max_name_len()
+    if len(name.encode()) <= limit:
+        return name
+    digest = hashlib.sha256(name.encode()).hexdigest()[:6]
+    prefix = name.encode()[: limit - 7].decode(errors="ignore").rstrip("-")
+    return f"{prefix}-{digest}"
 
 
 class ZellijError(RuntimeError):
