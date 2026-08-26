@@ -4,7 +4,7 @@ Provider-agnostic. The caller picks `provider` ("claude" or "codex").
 """
 from __future__ import annotations
 
-from . import providers
+from . import db, providers
 
 # Hard cap on input size sent to any provider for any single action
 MAX_INPUT_CHARS = 60_000
@@ -17,7 +17,11 @@ def _trim(text: str) -> str:
 
 
 async def _run(provider: str, tier: str, prompt: str) -> tuple[str, str]:
-    fn, model = providers.resolve(provider, tier)
+    # The user's saved per-tier model choice (Settings) overrides the default.
+    # Read at call time, not import time, so changing it takes effect without
+    # a restart.
+    override = db.get_setting(f"model_{provider}_{tier}", None)
+    fn, model = providers.resolve(provider, tier, override=override)
     return await fn(_trim(prompt), model=model)
 
 

@@ -132,17 +132,39 @@ async function jsonFetch<T>(url: string, init?: RequestInit): Promise<T> {
   return res.json() as Promise<T>;
 }
 
+export interface ModelChoice {
+  id: string;
+  label: string;
+  note: string;
+}
+
+export interface TierInfo {
+  key: string;
+  label: string;
+  note: string;
+}
+
 export interface AppSettings {
   provider: string;
   available_providers: string[];
   default_models: Record<string, { fast: string | null; smart: string | null }>;
+  /** Models offerable per provider, ascending capability/cost. */
+  available_models: Record<string, ModelChoice[]>;
+  /** Tiers a model can be chosen for, and what each drives. */
+  tiers: TierInfo[];
+  /** What each provider/tier will actually use right now (override or default). */
+  models: Record<string, Record<string, string | null>>;
 }
 
 export const api = {
   listProjects: () =>
     jsonFetch<{ projects: ProjectMeta[] }>("/api/projects").then((d) => d.projects),
   getSettings: () => jsonFetch<AppSettings>("/api/settings"),
-  updateSettings: (body: { provider?: string }) =>
+  updateSettings: (body: {
+    provider?: string;
+    /** {"claude": {"fast": "sonnet"}} — null clears the override. */
+    models?: Record<string, Record<string, string | null>>;
+  }) =>
     jsonFetch<AppSettings>("/api/settings", {
       method: "POST",
       body: JSON.stringify(body),

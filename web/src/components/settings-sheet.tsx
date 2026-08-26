@@ -14,8 +14,8 @@ const PROVIDER_INFO: Record<
   { label: string; description: string; tagline: string; icon: React.ReactNode }
 > = {
   claude: {
-    label: "Claude (Haiku 4.5)",
-    description: "Uses your `claude` CLI OAuth. Reliable, supports Arabic well. ~13–17s per translation.",
+    label: "Claude",
+    description: "Uses your `claude` CLI OAuth. Reliable, supports Arabic well. Pick the model per tier below.",
     tagline: "subscription · slower",
     icon: <Bot className="h-4 w-4" />,
   },
@@ -43,6 +43,23 @@ export function SettingsSheet() {
       api.getSettings().then(setSettings).catch(console.error);
     }
   }, [open, settings, setSettings]);
+
+  const setModel = async (provider: string, tier: string, model: string) => {
+    const key = `${provider}:${tier}`;
+    if (busy || settings?.models?.[provider]?.[tier] === model) return;
+    setBusy(key);
+    try {
+      const next = await api.updateSettings({ models: { [provider]: { [tier]: model } } });
+      setSettings(next);
+      const label =
+        next.available_models[provider]?.find((m) => m.id === model)?.label ?? model;
+      toast.success(`${tier === "fast" ? "Fast" : "Smart"} model: ${label}`);
+    } catch (e: any) {
+      toast.error(e?.message ?? "Failed to update model");
+    } finally {
+      setBusy(null);
+    }
+  };
 
   const switchProvider = async (provider: string) => {
     if (busy || settings?.provider === provider) return;
@@ -119,6 +136,60 @@ export function SettingsSheet() {
             })}
           </div>
         </div>
+
+        {settings && (settings.available_models[settings.provider] ?? []).length > 0 && (
+          <div className="mt-6">
+            <div className="mb-2 text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
+              Model
+            </div>
+            <div className="space-y-3">
+              {settings.tiers.map((tier) => {
+                const choices = settings.available_models[settings.provider] ?? [];
+                const current = settings.models?.[settings.provider]?.[tier.key];
+                return (
+                  <div key={tier.key}>
+                    <div className="flex items-baseline gap-2">
+                      <span className="text-[12px] font-medium">{tier.label}</span>
+                      <span className="text-[11px] text-muted-foreground">{tier.note}</span>
+                    </div>
+                    <div className="mt-1 inline-flex overflow-hidden rounded-md border border-border">
+                      {choices.map((m) => {
+                        const active = current === m.id;
+                        const thisBusy = busy === `${settings.provider}:${tier.key}`;
+                        return (
+                          <button
+                            key={m.id}
+                            type="button"
+                            title={m.note}
+                            disabled={busy !== null || active}
+                            onClick={() => setModel(settings.provider, tier.key, m.id)}
+                            className={cn(
+                              "px-2.5 py-1 text-[12px] transition-colors",
+                              active
+                                ? "bg-primary/15 font-medium text-foreground"
+                                : "text-muted-foreground hover:bg-accent/40 hover:text-foreground",
+                              busy !== null && !active && "opacity-50"
+                            )}
+                          >
+                            {thisBusy && !active ? (
+                              <Loader2 className="h-3 w-3 animate-spin" />
+                            ) : (
+                              m.label
+                            )}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+            <p className="mt-2 text-[11px] text-muted-foreground">
+              Cached translations are not re-run when you change model — use the
+              retranslate button on a turn to redo one with the new model.
+            </p>
+          </div>
+        )}
 
         <div className="mt-6">
           <RemotesManager />

@@ -21,10 +21,15 @@ PROVIDERS: dict[str, ProviderFn] = {
 
 # Per-provider default models for "fast" tier (translate/summarize/glossary)
 # vs "smart" tier (clarify/explain).
+#
+# Claude entries use the CLI's *aliases* rather than dated ids. `claude
+# --model sonnet` always resolves to the current Sonnet, so the app does not
+# silently keep calling a superseded snapshot every time a new one ships —
+# and there is no dated string to go stale in this file.
 DEFAULT_MODELS: dict[str, dict[str, str | None]] = {
     "claude": {
-        "fast": "claude-haiku-4-5-20251001",
-        "smart": "claude-sonnet-4-6",
+        "fast": "haiku",
+        "smart": "sonnet",
     },
     "codex": {
         # None → let codex use its configured default model
@@ -32,6 +37,53 @@ DEFAULT_MODELS: dict[str, dict[str, str | None]] = {
         "smart": None,
     },
 }
+
+# Models offerable per provider, in ascending capability/cost. `id` is passed
+# straight to the CLI's --model flag; every one of these is verified to be
+# accepted by `claude --model <id>`.
+AVAILABLE_MODELS: dict[str, list[dict[str, str]]] = {
+    "claude": [
+        {
+            "id": "haiku",
+            "label": "Haiku",
+            "note": "Fastest and cheapest. Good for translation and summaries.",
+        },
+        {
+            "id": "sonnet",
+            "label": "Sonnet",
+            "note": "Balanced. Noticeably better at explanation and code.",
+        },
+        {
+            "id": "opus",
+            "label": "Opus",
+            "note": "Most capable, slowest and priciest.",
+        },
+    ],
+    # Codex model selection lives in the codex CLI's own config, not here.
+    "codex": [],
+}
+
+# Which tiers the UI lets you choose a model for, and what each one drives.
+TIERS: list[dict[str, str]] = [
+    {
+        "key": "fast",
+        "label": "Fast",
+        "note": "Translate, summarize, glossary — high volume, short output.",
+    },
+    {
+        "key": "smart",
+        "label": "Smart",
+        "note": "Clarify, explain, prompt writer — reasoning-heavy.",
+    },
+]
+
+
+def model_choices(provider: str) -> list[dict[str, str]]:
+    return AVAILABLE_MODELS.get(provider, [])
+
+
+def is_valid_model(provider: str, model: str) -> bool:
+    return any(m["id"] == model for m in AVAILABLE_MODELS.get(provider, []))
 
 
 _log = logging.getLogger("watcher.providers")
@@ -113,9 +165,20 @@ _raw = PROVIDERS
 PROVIDERS = _GatedProviders(_raw)  # type: ignore[assignment]
 
 
-def resolve(provider: str, tier: str = "fast") -> tuple[ProviderFn, str | None]:
+def resolve(
+    provider: str, tier: str = "fast", *, override: str | None = None
+) -> tuple[ProviderFn, str | None]:
+    """Pick the callable and model for a provider/tier.
+
+    ``override`` is the user's saved model choice for this tier. It wins over
+    the built-in default, but only if it is still a model we offer — a stale
+    setting (model retired, provider switched) falls back rather than passing
+    a dead id to the CLI.
+    """
     if provider not in PROVIDERS:
         raise ValueError(f"unknown provider: {provider}")
+    if override and is_valid_model(provider, override):
+        return PROVIDERS[provider], override
     model = DEFAULT_MODELS.get(provider, {}).get(tier)
     return PROVIDERS[provider], model
 
