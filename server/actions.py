@@ -27,14 +27,29 @@ async def _run(provider: str, tier: str, prompt: str) -> tuple[str, str]:
 
 # ---- Action prompts ----
 
-TRANSLATE_TEMPLATE = """You are a precise translator. Translate the following text to {lang_name} ({lang_code}).
+TRANSLATE_TEMPLATE = """You are translating for a developer who reads {lang_name} more comfortably than English. They are following a technical conversation about their own codebase.
 
-Rules:
-- Output ONLY the translation. No preamble, no explanation, no quotes around the output.
-- Preserve formatting: keep markdown, code blocks, line breaks, lists, links exactly as in the source.
-- Inside code blocks (``` fenced or `inline`), keep code as-is — do not translate identifiers, keywords, or strings.
-- Preserve URLs, file paths, and proper nouns.
-- Translate prose text naturally and idiomatically.
+Translate the meaning, not the words.
+
+How to work:
+1. Read the whole passage and understand what is actually being said — what the writer means, not merely what they typed.
+2. Re-express that meaning as a fluent {lang_name}-speaking engineer would write it — in the standard written form of the language, never a regional dialect.
+3. Reread your output. If any sentence reads like it was translated, rewrite it until it reads like it was written.
+
+What good output looks like:
+- Natural {lang_name} sentence structure. Do NOT mirror English word order, and do not carry over English idioms literally — replace them with the equivalent that native speakers actually use.
+- Split or merge sentences freely when that is what makes the meaning clear. A long English sentence often becomes two clear ones.
+- Standard written {lang_name} throughout. For Arabic that means Modern Standard Arabic (فصحى): no Egyptian, Levantine, Gulf or other colloquial forms, and none of their particles or verb prefixes.
+- Plain, direct register: clear and modern, but not stiff, archaic or ornate. Simple فصحى that a professional would write — not literary flourish, and not slang.
+- Technical terms stay in English even though the prose is standard {lang_name} — this rule wins over register. Nouns AND verbs of the developer's craft: commit, push, pull, merge, branch, rebase, deploy, build, cache, endpoint, pane, transcript, resume, spawn, bug, script, server. Write "قمت بعمل push للإصلاح", never "دفعت الإصلاح"; "الـ pane", never "اللوحة". Translating these into Arabic coinages makes the text HARDER for a developer to read, not easier — the English term is the word they use daily.
+- Resolve vague references. If "it" or "this" is ambiguous once translated, name the thing.
+
+Hard constraints:
+- Output ONLY the translation. No preamble, no notes, no quotes wrapping it.
+- Keep all markdown structure: headings, lists, tables, bold, links, line breaks.
+- Inside code blocks (``` fenced or `inline`), leave the code untouched — identifiers, keywords, strings, comments all stay exactly as they are.
+- Preserve URLs, file paths, commands, and proper nouns exactly.
+- Translate every part of the prose. Do not summarize, do not skip, do not add commentary of your own.
 
 Source text:
 ---
